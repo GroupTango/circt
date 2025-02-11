@@ -26,50 +26,64 @@ namespace hw {
 using namespace circt;
 using namespace hw;
 
+// Use the GraphTraits specialized for circt::hw::HWModuleOp to traverse the
+// graph.
 using NodeType = circt::hw::detail::HWOperation;
 using NodeRef = NodeType *;
+using HWModuleOpGraphTraits = llvm::GraphTraits<HWModuleOp>;
+using HWModuleOpJSONGraphTraits =
+    circt::hw::JSONGraphTraits<circt::hw::HWModuleOp>;
 
 namespace {
 struct PrintHWModuleJsonPass
     : public circt::hw::impl::PrintHWModuleJsonBase<PrintHWModuleJsonPass> {
-  PrintHWModuleJsonPass(raw_ostream &os) : os(os) {}
+  PrintHWModuleJsonPass(raw_ostream &os) : os(os), jsonGraphTraits(false) {}
   void runOnOperation() override {
-    getOperation().walk([&](hw::HWModuleOp module) {
-      // Retrieve the entry node via your GraphTraits specialization.
-      NodeRef entryNode =
-          llvm::GraphTraits<hw::HWModuleOp>::getEntryNode(module);
-
+    getOperation().walk([&](HWModuleOp module) {
       llvm::SmallPtrSet<NodeRef, 16> visited;
-      llvm::json::Object moduleJson = visitNode(entryNode, module, visited);
+
+      llvm::json::Object moduleJson;
+      llvm::json::Array moduleNodes;
+      moduleJson["name"] = module.getNameAttr().getValue();
+      moduleJson["label"] = jsonGraphTraits.getNodeLabel(module, module);
+      moduleJson["attributes"] =
+          jsonGraphTraits.getNodeAttributes(module, module);
+
+      // Iterate over all top-level nodes in the module.
+      for (auto it = HWModuleOpGraphTraits::nodes_begin(module),
+                end = HWModuleOpGraphTraits::nodes_end(module);
+           it != end; ++it) {
+        NodeRef node = *it;
+        if (visited.count(node) == 0)
+          moduleNodes.push_back(visitNode(node, module, visited));
+      }
+      moduleJson["children"] = std::move(moduleNodes);
 
       // Output the JSON representation of the module's graph.
       os << llvm::json::Value(std::move(moduleJson)) << "\n";
     });
   }
-  llvm::json::Object visitNode(NodeRef node, const hw::HWModuleOp &module,
+
+  llvm::json::Object visitNode(NodeRef node, const HWModuleOp &module,
                                llvm::SmallPtrSetImpl<NodeRef> &visited) {
-    // If we've seen this node already, return an empty JSON object.
-    if (!visited.insert(node).second)
+    if (visited.count(node) > 0)
+      // TODO: should copy the node's JSON representation that we already
+      // created
       return llvm::json::Object();
 
-    llvm::DOTGraphTraits<circt::hw::HWModuleOp> traits(false);
+    visited.insert(node);
 
     llvm::json::Object json;
     json["name"] = node->getName().getStringRef();
-    json["label"] =
-        llvm::DOTGraphTraits<circt::hw::HWModuleOp>::getNodeLabel(node, module);
-    json["attributes"] = traits.getNodeAttributes(node, module);
+    json["label"] = jsonGraphTraits.getNodeLabel(node, module);
+    json["attributes"] = jsonGraphTraits.getNodeAttributes(node, module);
 
     llvm::json::Array children;
-    // Use the GraphTraits specialized for circt::hw::HWModuleOp.
-    // Note that our specialization inherited the child iterators
-    // from GraphTraits<HWOperation*>, which use op->user_begin()/user_end().
-    for (auto it = llvm::GraphTraits<circt::hw::HWModuleOp>::child_begin(node),
-              end = llvm::GraphTraits<circt::hw::HWModuleOp>::child_end(node);
+    for (auto it = HWModuleOpGraphTraits::child_begin(node),
+              end = HWModuleOpGraphTraits::child_end(node);
          it != end; ++it) {
       NodeRef child = *it;
       llvm::json::Object childJson = visitNode(child, module, visited);
-      // Optionally, check if childJson is empty to skip uninteresting nodes.
       children.push_back(std::move(childJson));
     }
     json["children"] = std::move(children);
@@ -77,6 +91,7 @@ struct PrintHWModuleJsonPass
   }
 
   raw_ostream &os;
+  HWModuleOpJSONGraphTraits jsonGraphTraits;
 };
 } // end anonymous namespace
 

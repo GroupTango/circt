@@ -1,4 +1,4 @@
-// RUN: circt-opt -hw-print-instance-graph %s -o %t 2>&1 | FileCheck %s
+// RUN: circt-opt -hw-print-module-json %s -o %t 2>&1 | FileCheck %s
 
 // TODO: write the tests
 
