@@ -199,48 +199,51 @@ struct circt::hw::JSONGraphTraits<circt::hw::HWModuleOp>
   JSONGraphTraits(bool isSimple = false) : DOTGraphTraits(isSimple) {}
 
   // Same attributes from DOTGraphTraits, but in JSON format.
-  llvm::json::Object getNodeAttributes(circt::hw::detail::HWOperation *node,
-                                       HWModuleOp mod) {
-    return llvm::TypeSwitch<mlir::Operation *, llvm::json::Object>(node)
-        .Case<circt::hw::ConstantOp>([&](auto op) -> llvm::json::Object {
-          llvm::json::Object obj;
-          obj["fillcolor"] = "darkgoldenrod1";
-          obj["style"] = "filled";
-          return obj;
+  llvm::json::Array getNodeAttributes(circt::hw::detail::HWOperation *node,
+                                      HWModuleOp mod) {
+    return llvm::TypeSwitch<mlir::Operation *, llvm::json::Array>(node)
+        .Case<circt::hw::ConstantOp>([&](auto op) -> llvm::json::Array {
+          return llvm::json::Array(
+              {llvm::json::Object(
+                   {{"key", "fillcolor"}, {"value", "darkgoldenrod1"}}),
+               llvm::json::Object({{"key", "style"}, {"value", "filled"}})});
         })
-        .Case<circt::comb::MuxOp>([&](auto op) -> llvm::json::Object {
-          llvm::json::Object obj;
-          obj["shape"] = "invtrapezium";
-          obj["fillcolor"] = "bisque";
-          obj["style"] = "filled";
-          return obj;
+        .Case<circt::comb::MuxOp>([&](auto op) -> llvm::json::Array {
+          return llvm::json::Array({
+              llvm::json::Object({{"key", "shape"}, {"value", "invtrapezium"}}),
+              llvm::json::Object({{"key", "fillcolor"}, {"value", "bisque"}}),
+              llvm::json::Object({{"key", "style"}, {"value", "filled"}}),
+          });
         })
-        .Case<circt::hw::OutputOp>([&](auto op) -> llvm::json::Object {
-          llvm::json::Object obj;
-          obj["fillcolor"] = "lightblue";
-          obj["style"] = "filled";
-          return obj;
+        .Case<circt::hw::OutputOp>([&](auto op) -> llvm::json::Array {
+          return llvm::json::Array({
+              llvm::json::Object(
+                  {{"key", "fillcolor"}, {"value", "lightblue"}}),
+              llvm::json::Object({{"key", "style"}, {"value", "filled"}}),
+          });
         })
-        .Default([&](auto op) -> llvm::json::Object {
-          return llvm::TypeSwitch<mlir::Dialect *, llvm::json::Object>(
+        .Default([&](auto op) -> llvm::json::Array {
+          return llvm::TypeSwitch<mlir::Dialect *, llvm::json::Array>(
                      op->getDialect())
-              .Case<circt::comb::CombDialect>([&](auto) -> llvm::json::Object {
-                llvm::json::Object obj;
-                obj["shape"] = "oval";
-                obj["fillcolor"] = "bisque";
-                obj["style"] = "filled";
-                return obj;
+              .Case<circt::comb::CombDialect>([&](auto) -> llvm::json::Array {
+                return llvm::json::Array({
+                    llvm::json::Object({{"key", "shape"}, {"value", "oval"}}),
+                    llvm::json::Object(
+                        {{"key", "fillcolor"}, {"value", "bisque"}}),
+                    llvm::json::Object({{"key", "style"}, {"value", "filled"}}),
+                });
               })
-              .template Case<circt::seq::SeqDialect>(
-                  [&](auto) -> llvm::json::Object {
-                    llvm::json::Object obj;
-                    obj["shape"] = "folder";
-                    obj["fillcolor"] = "gainsboro";
-                    obj["style"] = "filled";
-                    return obj;
-                  })
-              .Default([&](auto) -> llvm::json::Object {
-                return llvm::json::Object();
+              .template Case<circt::seq::SeqDialect>([&](auto)
+                                                         -> llvm::json::Array {
+                return llvm::json::Array({
+                    llvm::json::Object({{"key", "shape"}, {"value", "folder"}}),
+                    llvm::json::Object(
+                        {{"key", "fillcolor"}, {"value", "gainsboro"}}),
+                    llvm::json::Object({{"key", "style"}, {"value", "filled"}}),
+                });
+              })
+              .Default([&](auto) -> llvm::json::Array {
+                return llvm::json::Array();
               });
         });
   }
