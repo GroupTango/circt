@@ -92,7 +92,7 @@ struct PrintHWModuleJsonPass
       if (module == nullptr)
       {
         llvm::json::Object moduleJson;      
-        moduleJson["id"] = nextNodeId;
+        moduleJson["id"] = std::to_string(nextNodeId);
         moduleJson["label"] = "Unknown Module"; //Change to display said module name in future?
         moduleJson["namespace"] = nextPair.second;
 
@@ -128,7 +128,7 @@ struct PrintHWModuleJsonPass
       if (!hasInstances)
       {
         llvm::json::Object moduleJson;      
-        moduleJson["id"] = nextNodeId;
+        moduleJson["id"] = std::to_string(nextNodeId);
         moduleJson["label"] = "Self-Contained";
         moduleJson["namespace"] = nextPair.second;
 
