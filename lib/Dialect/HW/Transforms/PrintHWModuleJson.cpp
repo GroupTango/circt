@@ -1,11 +1,12 @@
-//===- PrintHWModuleJson.cpp - Print the instance graph --------*- C++ -*-===//
+//===- PrintHWModuleJson.cpp - Print the model graph --------*- C++ -*-===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //===----------------------------------------------------------------------===//
 //
-// Prints an HW module as a JSON graph compatible with Google's Model Explorer.
+// Prints a JSON representation of all modules in the MLIR file, in a format
+// that can be consumed by the Google Model Explorer.
 //
 //===----------------------------------------------------------------------===//
 
@@ -13,10 +14,12 @@
 #include "circt/Dialect/HW/HWOps.h"
 #include "circt/Dialect/HW/HWPasses.h"
 #include "mlir/Pass/Pass.h"
+#include "llvm/ADT/StringMap.h"
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/ADT/StringMap.h"
 
+#include <mlir/Support/LLVM.h>
+#include <stack>
 #include <vector>
 
 namespace circt {
@@ -30,7 +33,7 @@ using namespace circt;
 using namespace hw;
 
 // Use the GraphTraits specialized for circt::hw::HWModuleOp to traverse the
-// graph.
+// module graph.
 using NodeType = circt::hw::detail::HWOperation;
 using NodeRef = NodeType *;
 using HWModuleOpGraphTraits = llvm::GraphTraits<HWModuleOp>;
@@ -43,106 +46,150 @@ struct PrintHWModuleJsonPass
   PrintHWModuleJsonPass(raw_ostream &os) : os(os), jsonGraphTraits(false) {}
   void runOnOperation() override {
 
-    //NEED TO DO SOME CHANGES TO DISPLAY MORE INFO MISSING MODULES BETTER (Currently passing nullptr so can't print any info such as missing module names)
+    // NEED TO DO SOME CHANGES TO DISPLAY MORE INFO MISSING MODULES BETTER
+    // (Currently passing nullptr so can't print any info such as missing module
+    // names)
 
-    //Locate all modules in MLIR
-    llvm::StringMap<mlir::Operation*> moduleMap;
+    // Preprocessing:
+    // 1. Assign unique IDs to all operations
+    int64_t counter = 0;
+    mlir::Operation *baseOp = getOperation();
 
-    //Built in walkers are annoying in that they don't allow us to get back pointers to ops, so we need to traverse the top level ModuleOP ourselves
-    //All base module types are guaranteed to be on this top level region
-    mlir::Operation* baseOp = getOperation();
-    for (mlir::Region &region : baseOp->getRegions())
-    {
-      for (mlir::Block &block : region.getBlocks())
-      {
-        for (mlir::Operation& op : block.getOperations())
-        {
-          llvm::TypeSwitch<mlir::Operation*>(&op)
-          .Case<circt::hw::HWModuleOp>([&](auto module) { 
-            os << "Found HWModuleOp: " << module.getName() << "\n"; 
-            moduleMap[module.getName()] = &op;
-          })
-          .Case<circt::hw::HWModuleExternOp>([&](auto module) { os << "Found HWModuleExternOp: " << module.getName() << " SKIPPING\n"; })
-          .Case<circt::hw::HWModuleGeneratedOp>([&](auto module) { os << "Found HWModuleGeneratedOp: " << module.getName() << " SKIPPING\n"; })
-          .Default([&](auto) { os << "Found unknown top level module type: " << op.getName() << " SKIPPING\n"; });
+    baseOp->walk([&](mlir::Operation *op) {
+      auto id = mlir::IntegerAttr::get(
+          mlir::IntegerType::get(op->getContext(), 64), counter++);
+      op->setAttr("hw.unique_id", id);
+    });
+
+    // 2. Find all top level modules, populate moduleMap and incomingEdges
+    for (mlir::Region &region : baseOp->getRegions()) {
+      for (mlir::Block &block : region.getBlocks()) {
+        for (mlir::Operation &op : block.getOperations()) {
+          llvm::TypeSwitch<mlir::Operation *>(&op)
+              .Case<circt::hw::HWModuleOp>([&](auto module) {
+                os << "Found HWModuleOp: " << module.getName() << "\n";
+                moduleMap[module.getName()] = &op;
+                populateIncomingEdges(module);
+              })
+              .Case<circt::hw::HWModuleExternOp>([&](auto module) {
+                os << "Found HWModuleExternOp: " << module.getName()
+                   << " SKIPPING\n";
+              })
+              .Case<circt::hw::HWModuleGeneratedOp>([&](auto module) {
+                os << "Found HWModuleGeneratedOp: " << module.getName()
+                   << " SKIPPING\n";
+              })
+              .Default([&](auto) {
+                os << "Found unknown top level module type: " << op.getName()
+                   << " SKIPPING\n";
+              });
         }
       }
-    }  
-
-    //Start processing Modules to JSON
-    std::vector<std::pair<mlir::Operation*, std::string>> modulesToProcess;
-    llvm::json::Array outputJsonObjects;
-    uint64_t nextNodeId = 0;    
-
-    //Note: Iterator only returns keys, not values
-    for (auto const& x : moduleMap)
-    {
-      mlir::Operation* op = moduleMap[x.getKey()];
-      modulesToProcess.push_back(std::make_pair(op, x.getKey().str()));
-
-      os << "Adding top level Module for processing - Name: " << x.getKey() << " Type: " << op->getName() << "\n";
     }
 
-    while (modulesToProcess.size() > 0)
-    {
-      std::pair<mlir::Operation*, std::string> nextPair = modulesToProcess.back();
-      modulesToProcess.pop_back();
-      mlir::Operation* module = nextPair.first;      
+    // Start processing Modules to JSON
+    std::vector<std::pair<mlir::Operation *, std::string>> modulesToProcess;
+    llvm::json::Array outputJsonObjects;
 
-      if (module == nullptr)
-      {
-        llvm::json::Object moduleJson;      
-        moduleJson["id"] = std::to_string(nextNodeId);
-        moduleJson["label"] = "Unknown Module"; //Change to display said module name in future?
+    // Note: Iterator only returns keys, not values
+    for (auto const &x : moduleMap) {
+      mlir::Operation *op = moduleMap[x.getKey()];
+      modulesToProcess.push_back(std::make_pair(op, x.getKey().str()));
+
+      os << "Adding top level Module for processing - Name: " << x.getKey()
+         << " Type: " << op->getName() << "\n";
+    }
+
+    while (modulesToProcess.size() > 0) {
+      std::pair<mlir::Operation *, std::string> nextPair =
+          modulesToProcess.back();
+      modulesToProcess.pop_back();
+      mlir::Operation *module = nextPair.first;
+
+      if (module == nullptr) {
+        llvm::json::Object moduleJson;
+        moduleJson["id"] = getUniqueId(module, nextPair.second);
+        // Change to display said module name in future?
+        moduleJson["label"] = "Unknown Module";
         moduleJson["namespace"] = nextPair.second;
 
         outputJsonObjects.push_back(std::move(moduleJson));
-        nextNodeId++;     
         continue;
       }
 
       bool hasInstances = false;
 
-      //os << "   Regions: " << module->getRegions().size() << "\n";
-      for (mlir::Region &region : module->getRegions())
-      {
-        //os << "       Blocks: " << region.getBlocks().size() << "\n";
-        for (mlir::Block &block : region.getBlocks())
-        {
-          auto filteredOps = block.getOps<circt::hw::InstanceOp>();
-          for (circt::hw::InstanceOp instanceOp : filteredOps) 
-          {
-            hasInstances = true;
+      for (mlir::Region &region : module->getRegions()) {
+        for (mlir::Block &block : region.getBlocks()) {
+          for (mlir::Operation &op : block.getOperations()) {
 
-            //Is it possible to get the value of of the iterator, isntead of having to [] again? Also would adding std::move around the string concat change anything?
-            auto it = moduleMap.find(instanceOp.getReferencedModuleName());
-            if (it != moduleMap.end()) modulesToProcess.push_back(std::make_pair(moduleMap[instanceOp.getReferencedModuleName()], nextPair.second + "/" + instanceOp.getReferencedModuleName().str()));
-            else modulesToProcess.push_back(std::make_pair(nullptr, nextPair.second + "/" + instanceOp.getReferencedModuleName().str()));
+            NodeRef node = &op;
+            HWModuleOp moduleOp = mlir::dyn_cast<circt::hw::HWModuleOp>(module);
+
+            llvm::json::Object jsonObj{
+                {"label", jsonGraphTraits.getNodeLabel(node, moduleOp)},
+                {"attrs", jsonGraphTraits.getNodeAttributes(node, moduleOp)},
+                {"id", getUniqueId(node, nextPair.second)},
+                {"namespace", nextPair.second}};
+
+            if (isa<InstanceOp>(op)) {
+              InstanceOp instanceOp = cast<InstanceOp>(op);
+              hasInstances = true;
+              os << "Found InstanceOp: " << instanceOp.getReferencedModuleName()
+                 << "\n";
+
+              // Is it possible to get the value of the iterator, instead of
+              // having to [] again? Also would adding std::move around the
+              // string concat change anything?
+              auto refModuleName = instanceOp.getReferencedModuleName();
+              std::string newNamespace =
+                  nextPair.second + "/" + refModuleName.str();
+              auto it = moduleMap.find(refModuleName);
+              if (it != moduleMap.end())
+                modulesToProcess.push_back(
+                    {moduleMap[refModuleName], newNamespace});
+              else
+                modulesToProcess.push_back({nullptr, newNamespace});
+
+              // inter-module dependency, so we want (module -> hw.instance)
+              jsonObj["incomingEdges"] = llvm::json::Array{llvm::json::Object{
+                  {"sourceNodeId",
+                   getUniqueId(moduleMap[refModuleName],
+                               nextPair.second + "/" + refModuleName.str())},
+                  {"sourceNodeOutputId", "0"},
+                  {"targetNodeInputId", "0"}}};
+            } else {
+              // intra-module dependency, get from module graph
+              jsonObj["incomingEdges"] =
+                  getIncomingEdges(&op, moduleOp, nextPair.second);
+            }
+
+            outputJsonObjects.push_back(std::move(jsonObj));
           }
         }
       }
-      
-      //if (mlir::dyn_cast<InstanceOp>())
 
-      //If this is a self contained module, we will display it as a graph node.
-      if (!hasInstances)
-      {
-        llvm::json::Object moduleJson;      
-        moduleJson["id"] = std::to_string(nextNodeId);
-        moduleJson["label"] = "Self-Contained";
+      // If this is a self contained module, we will display it as a graph
+      // node.
+      if (!hasInstances) {
+        llvm::json::Object moduleJson;
+        HWModuleOp moduleOp = mlir::dyn_cast<circt::hw::HWModuleOp>(module);
+        moduleJson["id"] = getUniqueId(module, nextPair.second);
         moduleJson["namespace"] = nextPair.second;
-
-        //moduleJson["attributes"] = jsonGraphTraits.getNodeAttributes(module, module);
+        moduleJson["label"] = moduleOp.getNameAttr().getValue();
+        moduleJson["attrs"] =
+            jsonGraphTraits.getNodeAttributes(module, moduleOp);
+        moduleJson["incomingEdges"] =
+            getIncomingEdges(module, moduleOp, nextPair.second);
 
         outputJsonObjects.push_back(std::move(moduleJson));
-        nextNodeId++;        
+        nextNodeId++;
       }
-    }    
+    }
 
-    //Do some final wraps of our Json Node Array, as needed by Model Explorer
-    
+    // Do some final wraps of our JSON Node Array, as needed by Model Explorer
     llvm::json::Object graphWrapper;
-    graphWrapper["id"] = "test_mlir_file";    
+    graphWrapper["id"] = "test_mlir_file";
     graphWrapper["nodes"] = std::move(outputJsonObjects);
 
     llvm::json::Array graphArrayWrapper;
@@ -152,69 +199,74 @@ struct PrintHWModuleJsonPass
     fileWrapper["label"] = "model.json";
     fileWrapper["subgraphs"] = std::move(graphArrayWrapper);
 
-    //Output final JSON
+    // Output final JSON
+    llvm::json::Array jsonOutput{llvm::json::Value(std::move(fileWrapper))};
     os << "JSON:\n\n";
-    os << "[" << llvm::json::Value(std::move(fileWrapper)) << "]";
-    
-    //We print out the raw MLIR later for some reason? New lines to space out the raw MLIR
+    os << llvm::json::Value(std::move(jsonOutput));
+
+    // We print out the raw MLIR later for some reason? New lines to space out
+    // the raw MLIR
     os << "\n\n";
+  } // namespace
 
-    /*getOperation().walk([&](mlir::Operation* module) {      
-      llvm::SmallPtrSet<NodeRef, 16> visited;
+  void populateIncomingEdges(HWModuleOp module) {
+    std::stack<NodeRef> nodesToVisit;
+    llvm::SmallPtrSet<NodeRef, 32> visited;
 
-      llvm::json::Object moduleJson;
-      llvm::json::Array moduleNodes;
-      moduleJson["name"] = module.getNameAttr().getValue();
-      moduleJson["label"] = jsonGraphTraits.getNodeLabel(module, module);
-      moduleJson["attributes"] =
-          jsonGraphTraits.getNodeAttributes(module, module);
+    for (auto it = HWModuleOpGraphTraits::nodes_begin(module),
+              end = HWModuleOpGraphTraits::nodes_end(module);
+         it != end; ++it) {
+      nodesToVisit.push(*it);
+    }
 
-      // Iterate over all top-level nodes in the module.
-      for (auto it = HWModuleOpGraphTraits::nodes_begin(module),
-                end = HWModuleOpGraphTraits::nodes_end(module);
+    while (!nodesToVisit.empty()) {
+      NodeRef current = nodesToVisit.top();
+      nodesToVisit.pop();
+
+      if (!visited.insert(current).second)
+        continue;
+
+      for (auto it = HWModuleOpGraphTraits::child_begin(current),
+                end = HWModuleOpGraphTraits::child_end(current);
            it != end; ++it) {
-        NodeRef node = *it;
-        if (visited.count(node) == 0)
-          moduleNodes.push_back(visitNode(node, module, visited));
+        NodeRef child = *it;
+        // os << child->getName() << " <- " << current->getName() << "\n";
+        incomingEdges[child].push_back(current);
+        nodesToVisit.push(child);
       }
-      moduleJson["children"] = std::move(moduleNodes);
-
-      // Output the JSON representation of the module's graph.
-      os << llvm::json::Value(std::move(moduleJson)) << "\n";
-      
-    });
-    */
+    }
   }
 
-  
-  llvm::json::Object visitNode(NodeRef node, const HWModuleOp &module,
-                               llvm::SmallPtrSetImpl<NodeRef> &visited) {
-    if (visited.count(node) > 0)
-      // TODO: should copy the node's JSON representation that we already
-      // created
-      return llvm::json::Object();
-
-    visited.insert(node);
-
-    llvm::json::Object json;
-    json["name"] = node->getName().getStringRef();
-    json["label"] = jsonGraphTraits.getNodeLabel(node, module);
-    json["attributes"] = jsonGraphTraits.getNodeAttributes(node, module);
-
-    llvm::json::Array children;
-    for (auto it = HWModuleOpGraphTraits::child_begin(node),
-              end = HWModuleOpGraphTraits::child_end(node);
-         it != end; ++it) {
-      NodeRef child = *it;
-      llvm::json::Object childJson = visitNode(child, module, visited);
-      children.push_back(std::move(childJson));
+  llvm::json::Array getIncomingEdges(NodeRef node, HWModuleOp module,
+                                     std::string namesp) {
+    llvm::json::Array edges;
+    for (NodeRef parent : incomingEdges[node]) {
+      edges.push_back(
+          llvm::json::Object{{"sourceNodeId", getUniqueId(parent, namesp)},
+                             {"sourceNodeOutputId", "0"},
+                             {"targetNodeInputId", "0"}});
     }
-    json["children"] = std::move(children);
-    return json;
+    return edges;
+  }
+
+  std::string getUniqueId(mlir::Operation *node, const std::string &namesp) {
+    if (node == nullptr)
+      return namesp + "_" + std::to_string(nextNodeId++);
+
+    return namesp + "_" +
+           std::to_string(
+               mlir::cast<IntegerAttr>(node->getAttr("hw.unique_id")).getInt());
   }
 
   raw_ostream &os;
   HWModuleOpJSONGraphTraits jsonGraphTraits;
+
+  // Locate all modules in MLIR
+  llvm::StringMap<mlir::Operation *> moduleMap;
+
+  uint64_t nextNodeId = 0;
+
+  llvm::DenseMap<NodeRef, std::vector<NodeRef>> incomingEdges;
 };
 } // end anonymous namespace
 
