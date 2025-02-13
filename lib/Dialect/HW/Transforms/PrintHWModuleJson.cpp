@@ -43,6 +43,8 @@ struct PrintHWModuleJsonPass
   PrintHWModuleJsonPass(raw_ostream &os) : os(os), jsonGraphTraits(false) {}
   void runOnOperation() override {
 
+    //NEED TO DO SOME CHANGES TO DISPLAY MORE INFO MISSING MODULES BETTER (Currently passing nullptr so can't print any info such as missing module names)
+
     //Locate all modules in MLIR
     llvm::StringMap<mlir::Operation*> moduleMap;
 
@@ -60,9 +62,9 @@ struct PrintHWModuleJsonPass
             os << "Found HWModuleOp: " << module.getName() << "\n"; 
             moduleMap[module.getName()] = &op;
           })
-          .Case<circt::hw::HWModuleExternOp>([&](auto module) { os << "Found HWModuleExternOp: " << module.getName() << "\n"; })
-          .Case<circt::hw::HWModuleGeneratedOp>([&](auto module) { os << "Found HWModuleGeneratedOp: " << module.getName() << "\n"; })
-          .Default([&](auto) { os << "Found unknown top level module type: " << op.getName() << "\n"; });
+          .Case<circt::hw::HWModuleExternOp>([&](auto module) { os << "Found HWModuleExternOp: " << module.getName() << " SKIPPING\n"; })
+          .Case<circt::hw::HWModuleGeneratedOp>([&](auto module) { os << "Found HWModuleGeneratedOp: " << module.getName() << " SKIPPING\n"; })
+          .Default([&](auto) { os << "Found unknown top level module type: " << op.getName() << " SKIPPING\n"; });
         }
       }
     }  
@@ -87,6 +89,18 @@ struct PrintHWModuleJsonPass
       modulesToProcess.pop_back();
       mlir::Operation* module = nextPair.first;      
 
+      if (module == nullptr)
+      {
+        llvm::json::Object moduleJson;      
+        moduleJson["id"] = nextNodeId;
+        moduleJson["label"] = "Unknown Module"; //Change to display said module name in future?
+        moduleJson["namespace"] = nextPair.second;
+
+        outputJsonObjects.push_back(std::move(moduleJson));
+        nextNodeId++;     
+        continue;
+      }
+
       bool hasInstances = false;
 
       //os << "   Regions: " << module->getRegions().size() << "\n";
@@ -99,8 +113,11 @@ struct PrintHWModuleJsonPass
           for (circt::hw::InstanceOp instanceOp : filteredOps) 
           {
             hasInstances = true;
-            //os << "Instances: " << instanceOp.getReferencedModuleName() << "\n";
-            modulesToProcess.push_back(std::make_pair(moduleMap[instanceOp.getReferencedModuleName()], nextPair.second + "/" + instanceOp.getReferencedModuleName().str()));
+
+            //Is it possible to get the value of of the iterator, isntead of having to [] again? Also would adding std::move around the string concat change anything?
+            auto it = moduleMap.find(instanceOp.getReferencedModuleName());
+            if (it != moduleMap.end()) modulesToProcess.push_back(std::make_pair(moduleMap[instanceOp.getReferencedModuleName()], nextPair.second + "/" + instanceOp.getReferencedModuleName().str()));
+            else modulesToProcess.push_back(std::make_pair(nullptr, nextPair.second + "/" + instanceOp.getReferencedModuleName().str()));
           }
         }
       }
