@@ -43,6 +43,7 @@ using HWModuleOpJSONGraphTraits =
 namespace {
 struct PrintHWModuleJsonPass
     : public circt::hw::impl::PrintHWModuleJsonBase<PrintHWModuleJsonPass> {
+      
   PrintHWModuleJsonPass(raw_ostream &os) : os(os), jsonGraphTraits(false) {}
   void runOnOperation() override {
 

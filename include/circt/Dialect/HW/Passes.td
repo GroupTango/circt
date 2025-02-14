@@ -35,6 +35,11 @@ def PrintHWModuleJson : Pass<"hw-print-module-json", "mlir::ModuleOp"> {
   let constructor =  "circt::hw::createPrintHWModuleJsonPass()";
 }
 
+def PrintHWModuleInstanceJson : Pass<"hw-print-module-instance-json", "mlir::ModuleOp"> {
+  let summary = "Print a JSON representation of the HWModule's instance hierarchy within a top-level module.";
+  let constructor =  "circt::hw::createPrintHWModuleInstanceJsonPass()";
+}
+
 def FlattenIO : Pass<"hw-flatten-io", "mlir::ModuleOp"> {
   let summary = "Flattens hw::Structure typed in- and output ports.";
   let constructor =  "circt::hw::createFlattenIOPass()";

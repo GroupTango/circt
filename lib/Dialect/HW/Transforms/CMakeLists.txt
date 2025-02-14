@@ -4,6 +4,7 @@ add_circt_dialect_library(CIRCTHWTransforms
   HWSpecialize.cpp
   PrintHWModuleGraph.cpp
   PrintHWModuleJson.cpp
+  PrintHWModuleInstanceJson.cpp
   FlattenIO.cpp
   VerifyInnerRefNamespace.cpp
   FlattenModules.cpp

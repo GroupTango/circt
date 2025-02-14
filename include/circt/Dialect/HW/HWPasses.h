@@ -28,6 +28,7 @@ std::unique_ptr<mlir::Pass> createPrintInstanceGraphPass();
 std::unique_ptr<mlir::Pass> createHWSpecializePass();
 std::unique_ptr<mlir::Pass> createPrintHWModuleGraphPass();
 std::unique_ptr<mlir::Pass> createPrintHWModuleJsonPass();
+std::unique_ptr<mlir::Pass> createPrintHWModuleInstanceJsonPass();
 std::unique_ptr<mlir::Pass> createFlattenIOPass(bool recursiveFlag = true,
                                                 bool flattenExternFlag = false,
                                                 char joinChar = '.');
