@@ -57,7 +57,7 @@ std::string hw::MlirToInstanceGraphJson(mlir::Operation *baseModule, raw_ostream
     }
   }
 
-  //Start processing Modules to JSON
+  // Start processing Modules to JSON
   for (auto const& x : moduleMap)  {
     mlir::Operation* op = moduleMap[x.getKey()];
     modulesToProcess.push(std::make_pair(op, x.getKey().str()));
@@ -71,7 +71,6 @@ std::string hw::MlirToInstanceGraphJson(mlir::Operation *baseModule, raw_ostream
     std::pair<mlir::Operation*, std::string> nextPair = modulesToProcess.top();
     modulesToProcess.pop();
     auto* module = nextPair.first;
-    //dyn_cast<circt::hw::HWModuleOpBase>(nextPair.first);      
 
     if (module == nullptr) {
       llvm::json::Object moduleJson {      
@@ -85,36 +84,60 @@ std::string hw::MlirToInstanceGraphJson(mlir::Operation *baseModule, raw_ostream
     }
 
     bool hasInstances = false;
+    uint64_t instanceID = 0;
 
     for (mlir::Region &region : module->getRegions()) {
       for (mlir::Block &block : region.getBlocks()) {
         for (mlir::Operation &op : block.getOperations()) {
-
-          if (auto instance = dyn_cast<InstanceOp>(&op)) {
-            hasInstances = true;
-            std::string newNamespace = nextPair.second + "/" + instance.getReferencedModuleName().str();
+          if (auto instance = dyn_cast<InstanceOp>(&op)) {            
+            std::string newNamespace = nextPair.second + "/" + instance.getReferencedModuleName().str() + " (I" + std::to_string(instanceID) + ")";
 
             auto it = moduleMap.find(instance.getReferencedModuleName());
             if (it != moduleMap.end()) modulesToProcess.push(std::make_pair(moduleMap[instance.getReferencedModuleName()], newNamespace));
             else modulesToProcess.push(std::make_pair(nullptr, newNamespace));
-          }
-          else if (auto choiceInstance = dyn_cast<InstanceOp>(&op)) {
+            
+            instanceID++;
             hasInstances = true;
+          }
+          else if (auto choiceInstance = dyn_cast<InstanceChoiceOp>(&op)) {
+            mlir::ArrayAttr moduleNames = choiceInstance.getModuleNamesAttr();      
+            for  (auto attr : moduleNames)
+            {
+              mlir::StringRef instanceName = llvm::cast<FlatSymbolRefAttr>(attr).getValue();
+              std::string newNamespace = nextPair.second + "/INSTANCE CHOICE (I" + std::to_string(instanceID) + ")/" + instanceName.str();
 
-            //Deal with this later
+              auto it = moduleMap.find(instanceName);
+              if (it != moduleMap.end()) modulesToProcess.push(std::make_pair(moduleMap[instanceName], newNamespace));
+              else modulesToProcess.push(std::make_pair(nullptr, newNamespace));
+            }
+
+            instanceID++;
+            hasInstances = true;
           }
         }
       }
     }
 
-    //If this is a self contained module, we will display it as a graph node.
+    // If this is a self contained module, we will display it as a graph node.
     if (!hasInstances)
     {
-      //Change "Self-Contaiend" to other based on module type (extern gets "External")
-      llvm::json::Object moduleJson {      
+      llvm::json::Object moduleJson {
         {"id", std::to_string(nextNodeId)},
-        {"label", "Self-Contained"},
         {"namespace", nextPair.second}};
+      
+      llvm::TypeSwitch<mlir::Operation *>(module)
+            .Case<circt::hw::HWModuleOp>([&](auto module) {
+              moduleJson["label"] = "Self-Contained";
+            })
+            .Case<circt::hw::HWModuleExternOp>([&](auto module) {
+              moduleJson["label"] = "External";
+            })
+            .Case<circt::hw::HWModuleGeneratedOp>([&](auto module) {              
+              moduleJson["label"] = "External (Generated)";
+            })
+            .Default([&](auto) {              
+              moduleJson["label"] = "UNKNOWN ERROR";
+            });
 
       outputJsonObjects.push_back(std::move(moduleJson));
       nextNodeId++;        
@@ -122,16 +145,16 @@ std::string hw::MlirToInstanceGraphJson(mlir::Operation *baseModule, raw_ostream
   }    
 
   // Do some final wraps of our JSON Node Array, as needed by Model Explorer
-  llvm::json::Object graphWrapper;
-  graphWrapper["id"] = "test_mlir_file";
-  graphWrapper["nodes"] = std::move(outputJsonObjects);
+  llvm::json::Object graphWrapper {
+    {"id", std::to_string(nextNodeId)},
+    {"nodes", std::move(outputJsonObjects)}};
 
   llvm::json::Array graphArrayWrapper;
   graphArrayWrapper.push_back(std::move(graphWrapper));
 
-  llvm::json::Object fileWrapper;
-  fileWrapper["label"] = "model.json";
-  fileWrapper["subgraphs"] = std::move(graphArrayWrapper);
+  llvm::json::Object fileWrapper {
+    {"label", "model.json"},
+    {"subgraphs", std::move(graphArrayWrapper)}};
 
   llvm::json::Array fileArrayWrapper{llvm::json::Value(std::move(fileWrapper))};
 

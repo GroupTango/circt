@@ -5,12 +5,11 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //===----------------------------------------------------------------------===//
 //
-// Prints a JSON representation of all modules in the MLIR file, in a format
+// Prints a JSON representation of all modules (based on instancing) in the MLIR file, in a format
 // that can be consumed by the Google Model Explorer.
 //
 //===----------------------------------------------------------------------===//
 
-#include "circt/Dialect/HW/HWModelExplorerInterfaces.h"
 #include "circt/Dialect/HW/HWOps.h"
 #include "circt/Dialect/HW/HWPasses.h"
 #include "mlir/Pass/Pass.h"
