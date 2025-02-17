@@ -1,18 +1,19 @@
-//===- PrintHWModuleInstanceJson.cpp - Print the model graph --------*- C++ -*-===//
+//===- PrintHWModuleInstanceJson.cpp - Print the model graph --------*- C++
+//-*-===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //===----------------------------------------------------------------------===//
 //
-// Prints a JSON representation of all modules (based on instancing) in the MLIR file, in a format
-// that can be consumed by the Google Model Explorer.
+// Prints a JSON representation of all modules (based on instancing) in the MLIR
+// file, in a format that can be consumed by the Google Model Explorer.
 //
 //===----------------------------------------------------------------------===//
 
+#include "circt/Dialect/HW/HWModelExplorerInterfaces.h"
 #include "circt/Dialect/HW/HWOps.h"
 #include "circt/Dialect/HW/HWPasses.h"
-#include "circt/Dialect/HW/HWModelExplorerInterfaces.h"
 
 #include "mlir/Pass/Pass.h"
 #include "llvm/Support/raw_ostream.h"
@@ -29,14 +30,15 @@ using namespace hw;
 
 namespace {
 struct PrintHWModuleInstanceJsonPass
-    : public circt::hw::impl::PrintHWModuleInstanceJsonBase<PrintHWModuleInstanceJsonPass> {
+    : public circt::hw::impl::PrintHWModuleInstanceJsonBase<
+          PrintHWModuleInstanceJsonPass> {
 
   PrintHWModuleInstanceJsonPass(raw_ostream &os) : os(os) {}
 
   void runOnOperation() override {
     mlir::Operation *baseOp = getOperation();
-    const std::string Json = circt::hw::MlirToInstanceGraphJson(baseOp, &os);    
-    
+    const std::string Json = circt::hw::MlirToInstanceGraphJson(baseOp, &os);
+
     os << "JSON:\n\n";
     os << Json;
 

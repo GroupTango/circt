@@ -10,9 +10,9 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "circt/Dialect/HW/HWModelExplorerInterfaces.h"
 #include "circt/Dialect/HW/HWOps.h"
 #include "circt/Dialect/HW/HWPasses.h"
-#include "circt/Dialect/HW/HWModelExplorerInterfaces.h"
 
 #include "mlir/Pass/Pass.h"
 #include "llvm/Support/raw_ostream.h"
@@ -29,14 +29,14 @@ using namespace hw;
 
 namespace {
 struct PrintHWModuleJsonPass
-    : public circt::hw::impl::PrintHWModuleJsonBase<PrintHWModuleJsonPass> {   
+    : public circt::hw::impl::PrintHWModuleJsonBase<PrintHWModuleJsonPass> {
 
   PrintHWModuleJsonPass(raw_ostream &os) : os(os) {}
 
   void runOnOperation() override {
     mlir::Operation *baseOp = getOperation();
-    const std::string Json = circt::hw::MlirToOperationGraphJson(baseOp, &os);    
-    
+    const std::string Json = circt::hw::MlirToOperationGraphJson(baseOp, &os);
+
     os << "JSON:\n\n";
     os << Json;
 
