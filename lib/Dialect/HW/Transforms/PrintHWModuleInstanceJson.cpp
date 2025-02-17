@@ -11,7 +11,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "circt/Dialect/HW/HWModelExplorerInterfaces.h"
+#include "circt/Dialect/HW/HWModelExplorer.h"
 #include "circt/Dialect/HW/HWOps.h"
 #include "circt/Dialect/HW/HWPasses.h"
 

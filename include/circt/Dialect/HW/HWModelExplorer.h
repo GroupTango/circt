@@ -1,11 +1,9 @@
-#ifndef CIRCT_DIALECT_HW_MODELEXPLORERINTERFACES_H
-#define CIRCT_DIALECT_HW_MODELEXPLORERINTERFACES_H
+#ifndef CIRCT_DIALECT_HW_MODELEXPLORER_H
+#define CIRCT_DIALECT_HW_MODELEXPLORER_H
 
 #include "circt/Dialect/HW/HWOps.h"
 #include "mlir/Support/LLVM.h"
 #include "llvm/Support/raw_ostream.h"
-
-#include <string>
 
 namespace circt {
 namespace hw {
@@ -19,4 +17,4 @@ std::string MlirToOperationGraphJson(mlir::Operation *baseModule,
 } // namespace hw
 } // namespace circt
 
-#endif // CIRCT_DIALECT_HW_MODELEXPLORERINTERFACES_H
+#endif // CIRCT_DIALECT_HW_MODELEXPLORER_H
