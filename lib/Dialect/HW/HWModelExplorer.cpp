@@ -155,9 +155,11 @@ protected:
       return;
     }
 
+    bool hasInstances = false;
     uint64_t instanceID = 0;
+
     // Iterate over sub-operations to find instances.
-    forEachOperation(baseModule, [&](mlir::Operation &op) {
+    forEachOperation(module, [&](mlir::Operation &op) {
       if (auto instance = dyn_cast<InstanceOp>(&op)) {
         std::string newNamespace = ns + "/" +
                                    instance.getReferencedModuleName().str() +
@@ -167,7 +169,8 @@ protected:
               {moduleMap[instance.getReferencedModuleName()], newNamespace});
         else
           modulesToProcess.push({nullptr, newNamespace});
-        instanceID++;
+        instanceID++;        
+        hasInstances = true;
       } else if (auto choiceInstance = dyn_cast<InstanceChoiceOp>(&op)) {
         mlir::ArrayAttr moduleNames = choiceInstance.getModuleNamesAttr();
         for (auto attr : moduleNames) {
@@ -182,21 +185,26 @@ protected:
             modulesToProcess.push({nullptr, newNamespace});
         }
         instanceID++;
+        hasInstances = true;
       }
     });
 
-    llvm::json::Object moduleJson{{"id", std::to_string(nextNodeId)},
-                                  {"namespace", ns}};
-    llvm::TypeSwitch<mlir::Operation *>(module)
-        .Case<hw::HWModuleOp>(
-            [&](auto mod) { moduleJson["label"] = "Self-Contained"; })
-        .Case<hw::HWModuleExternOp>(
-            [&](auto mod) { moduleJson["label"] = "External"; })
-        .Case<hw::HWModuleGeneratedOp>(
-            [&](auto mod) { moduleJson["label"] = "External (Generated)"; })
-        .Default([&](auto mod) { moduleJson["label"] = "UNKNOWN ERROR"; });
-    outputJsonObjects.push_back(std::move(moduleJson));
-    nextNodeId++;
+    // If this is a independant module, we will display it as a graph node.
+    if (!hasInstances)
+    {      
+      llvm::json::Object moduleJson{{"id", std::to_string(nextNodeId)},
+                                    {"namespace", ns}};
+      llvm::TypeSwitch<mlir::Operation *>(module)
+          .Case<hw::HWModuleOp>(
+              [&](auto mod) { moduleJson["label"] = "Self-Contained"; })
+          .Case<hw::HWModuleExternOp>(
+              [&](auto mod) { moduleJson["label"] = "External"; })
+          .Case<hw::HWModuleGeneratedOp>(
+              [&](auto mod) { moduleJson["label"] = "External (Generated)"; })
+          .Default([&](auto mod) { moduleJson["label"] = "Unknown Module"; });
+      outputJsonObjects.push_back(std::move(moduleJson));
+      nextNodeId++;
+    }
   }
 };
 
