@@ -20,6 +20,7 @@
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/raw_ostream.h"
 #include <stack>
+#include <vector>
 
 using namespace circt;
 using namespace circt::hw;
@@ -40,77 +41,22 @@ void forEachOperation(mlir::Operation *op, Fn f) {
         f(childOp);
 }
 
+
 class GraphGenerator {
 public:
-  GraphGenerator(mlir::Operation *baseModule, llvm::raw_ostream *os)
-      : baseModule(baseModule), os(os), nextNodeId(0) {}
+  GraphGenerator(llvm::raw_ostream *os)
+      : os(os), nextNodeId(0) {}
 
   virtual ~GraphGenerator() = default;
 
   // Main entry point: initialize, process modules, and wrap the output.
-  std::string generateGraphJson() {
-    initializeModules();
-    processModules();
-    return wrapJson(outputJsonObjects);
-  }
+  virtual std::string generateGraphJson() = 0;
 
 protected:
-  mlir::Operation *baseModule;
   llvm::raw_ostream *os;
-  uint64_t nextNodeId;
-  llvm::StringMap<mlir::Operation *> moduleMap;
-  std::stack<std::pair<mlir::Operation *, std::string>> modulesToProcess;
+  llvm::StringMap<mlir::Operation *> moduleMap;  
+  int64_t nextNodeId;
   llvm::json::Array outputJsonObjects;
-
-  // Discover top-level modules from the base module.
-  virtual void initializeModules() {
-    forEachOperation(baseModule, [&](mlir::Operation &op) {
-      llvm::TypeSwitch<mlir::Operation *>(&op)
-          .Case<hw::HWModuleOp>([&](auto module) {
-            if (os)
-              *os << "Found HWModuleOp: " << module.getName() << "\n";
-            moduleMap[module.getName()] = &op;
-          })
-          .Case<hw::HWModuleExternOp>([&](auto module) {
-            if (os)
-              *os << "Found HWModuleExternOp: " << module.getName() << "\n";
-            moduleMap[module.getName()] = &op;
-          })
-          .Case<hw::HWModuleGeneratedOp>([&](auto module) {
-            if (os)
-              *os << "Found HWModuleGeneratedOp: " << module.getName() << "\n";
-            moduleMap[module.getName()] = &op;
-          })
-          .Default([&](auto) {
-            if (os)
-              *os << "Found unknown module: " << op.getName() << "\n";
-            // If the module type is unknown, enqueue it with a null
-            // pointer.
-            modulesToProcess.push({nullptr, op.getName().getStringRef().str()});
-          });
-    });
-    // Enqueue discovered modules for further processing.
-    for (auto const &entry : moduleMap) {
-      mlir::Operation *op = moduleMap[entry.getKey()];
-      modulesToProcess.push({op, entry.getKey().str()});
-      if (os)
-        *os << "Adding top level Module for processing - Name: "
-            << entry.getKey() << " Type: " << op->getName() << "\n";
-    }
-  }
-
-  // Process all enqueued modules.
-  virtual void processModules() {
-    while (!modulesToProcess.empty()) {
-      auto nextPair = modulesToProcess.top();
-      modulesToProcess.pop();
-      processModule(nextPair.first, nextPair.second);
-    }
-  }
-
-  // Pure virtual: process a module given its operation pointer and namespace.
-  virtual void processModule(mlir::Operation *module,
-                             const std::string &ns) = 0;
 
   std::string wrapJson(llvm::json::Array nodes) {
     llvm::json::Object graphWrapper{{"id", std::to_string(nextNodeId)},
@@ -141,70 +87,119 @@ protected:
 // Graph generator for Instance Graphs.
 class InstanceGraphGenerator : public GraphGenerator {
 public:
-  InstanceGraphGenerator(mlir::Operation *baseModule, llvm::raw_ostream *os)
-      : GraphGenerator(baseModule, os) {}
-
-protected:
-  void processModule(mlir::Operation *module, const std::string &ns) override {
-    if (!module) {
-      llvm::json::Object moduleJson{{"id", std::to_string(nextNodeId)},
-                                    {"label", "Unknown Module"},
-                                    {"namespace", ns}};
-      outputJsonObjects.push_back(std::move(moduleJson));
-      nextNodeId++;
-      return;
-    }
-
-    bool hasInstances = false;
-    uint64_t instanceID = 0;
-
-    // Iterate over sub-operations to find instances.
-    forEachOperation(module, [&](mlir::Operation &op) {
-      if (auto instance = dyn_cast<InstanceOp>(&op)) {
-        std::string newNamespace = ns + "/" +
-                                   instance.getReferencedModuleName().str() +
-                                   " (I" + std::to_string(instanceID) + ")";
-        if (moduleMap.count(instance.getReferencedModuleName()))
-          modulesToProcess.push(
-              {moduleMap[instance.getReferencedModuleName()], newNamespace});
-        else
-          modulesToProcess.push({nullptr, newNamespace});
-        instanceID++;        
-        hasInstances = true;
-      } else if (auto choiceInstance = dyn_cast<InstanceChoiceOp>(&op)) {
-        mlir::ArrayAttr moduleNames = choiceInstance.getModuleNamesAttr();
-        for (auto attr : moduleNames) {
-          mlir::StringRef instanceName =
-              cast<FlatSymbolRefAttr>(attr).getValue();
-          std::string newNamespace = ns + "/INSTANCE CHOICE (I" +
-                                     std::to_string(instanceID) + ")/" +
-                                     instanceName.str();
-          if (moduleMap.count(instanceName))
-            modulesToProcess.push({moduleMap[instanceName], newNamespace});
-          else
-            modulesToProcess.push({nullptr, newNamespace});
-        }
-        instanceID++;
-        hasInstances = true;
-      }
+  InstanceGraphGenerator(mlir::Operation *baseOperation, llvm::raw_ostream *os)
+      : GraphGenerator(os), baseOperation(baseOperation) {}
+  
+  std::string generateGraphJson() override {
+    // Discover all modules to graph.
+    forEachOperation(baseOperation, [&](mlir::Operation &op) {
+      llvm::TypeSwitch<mlir::Operation *>(&op)
+          .Case<hw::HWModuleOp>([&](auto module) {
+            if (os)
+              *os << "Found HWModuleOp: " << module.getName() << "\n";
+            moduleMap[module.getName()] = &op;
+          })
+          .Case<hw::HWModuleExternOp>([&](auto module) {
+            if (os)
+              *os << "Found HWModuleExternOp: " << module.getName() << "\n";
+            moduleMap[module.getName()] = &op;
+          })
+          .Case<hw::HWModuleGeneratedOp>([&](auto module) {
+            if (os)
+              *os << "Found HWModuleGeneratedOp: " << module.getName() << "\n";
+            moduleMap[module.getName()] = &op;
+          })
+          .Default([&](auto) {
+            if (os)
+              *os << "Found unknown module type: " << op.getName() << "\n";            
+            moduleMap[op.getName().getStringRef()] = &op;
+          });
     });
 
-    // If this is a independant module, we will display it as a graph node.
-    if (!hasInstances)
-    {      
-      llvm::json::Object moduleJson{{"id", std::to_string(nextNodeId)},
-                                    {"namespace", ns}};
-      llvm::TypeSwitch<mlir::Operation *>(module)
-          .Case<hw::HWModuleOp>(
-              [&](auto mod) { moduleJson["label"] = "Self-Contained"; })
-          .Case<hw::HWModuleExternOp>(
-              [&](auto mod) { moduleJson["label"] = "External"; })
-          .Case<hw::HWModuleGeneratedOp>(
-              [&](auto mod) { moduleJson["label"] = "External (Generated)"; })
-          .Default([&](auto mod) { moduleJson["label"] = "Unknown Module"; });
-      outputJsonObjects.push_back(std::move(moduleJson));
-      nextNodeId++;
+    // Process modules.
+    std::stack<std::tuple<mlir::Operation *, std::string, int64_t>> treesToProcess;
+
+    for (auto const &entry : moduleMap) {
+      mlir::Operation *baseModule = moduleMap[entry.getKey()];
+      treesToProcess.push({baseModule, entry.getKey().str(), -1});
+      //if (os)
+      //  *os << "Queuing top level Module - Name: "
+      //      << entry.getKey() << " Type: " << baseModule->getName() << "\n";   
     }
+
+    while (treesToProcess.size() > 0)
+    {
+      mlir::Operation *module;
+      std::string currentNamespace;
+      int64_t parentId;
+
+      std::tie(module, currentNamespace, parentId) = treesToProcess.top();
+      treesToProcess.pop();    
+
+      // Iterate over sub-operations to find instances.
+      bool hasInstances = false;
+      int64_t instanceChoiceId = 0;
+      forEachOperation(module, [&](mlir::Operation &op) {
+        if (auto instance = dyn_cast<InstanceOp>(&op)) {      
+          // Generate model explorer node      
+          generateInstanceNode(instance.getReferencedModuleName(), nextNodeId, currentNamespace, parentId);
+          // Push back for processing of children
+          if (moduleMap.count(instance.getReferencedModuleName()))
+            treesToProcess.push({moduleMap[instance.getReferencedModuleName()], currentNamespace, nextNodeId});
+          nextNodeId++;        
+          hasInstances = true;
+        } else if (auto choiceInstance = dyn_cast<InstanceChoiceOp>(&op)) {
+          mlir::ArrayAttr moduleNames = choiceInstance.getModuleNamesAttr();
+          std::string newNamespace = currentNamespace + "/CHOICE (" +
+                                      std::to_string(instanceChoiceId) + ")";
+          for (auto attr : moduleNames) {
+            llvm::StringRef instanceName = cast<FlatSymbolRefAttr>(attr).getAttr().getValue();
+            generateInstanceNode(instanceName, nextNodeId, newNamespace, parentId);
+            if (moduleMap.count(instanceName))
+              treesToProcess.push({moduleMap[instanceName], newNamespace, nextNodeId});      
+            nextNodeId++;   
+          }
+          instanceChoiceId++;
+          hasInstances = true;
+        }
+      });
+
+      // If this is a top level and independant module, we will display appropriate node.
+      if (!hasInstances && parentId == -1)
+      {       
+        llvm::TypeSwitch<mlir::Operation *>(module)
+            .Case<hw::HWModuleOp>(
+                [&](auto mod) { generateInstanceNode(llvm::StringRef {"Self-Contained"}, nextNodeId, currentNamespace, -1); })
+            .Case<hw::HWModuleExternOp>(
+                [&](auto mod) { generateInstanceNode(llvm::StringRef {"External"}, nextNodeId, currentNamespace, -1); })
+            .Case<hw::HWModuleGeneratedOp>(
+                [&](auto mod) { generateInstanceNode(llvm::StringRef {"External (Generated)"}, nextNodeId, currentNamespace, -1); })
+            .Default([&](auto mod) 
+                              { generateInstanceNode(llvm::StringRef {"Unknown Module"}, nextNodeId, currentNamespace, -1); });        
+        nextNodeId++;
+      }
+    }   
+
+    return wrapJson(outputJsonObjects);
+  }
+
+protected:
+  mlir::Operation *baseOperation;
+
+  void generateInstanceNode(llvm::StringRef label, int64_t nextNodeId, std::string &newNamespace, int64_t parentId) {
+    llvm::json::Object instanceJson{{"id", std::to_string(nextNodeId)},
+                                    {"namespace", newNamespace},
+                                    {"label", label}};
+    if (parentId != -1) {
+      instanceJson["incomingEdges"] = llvm::json::Array{llvm::json::Object{
+        {"sourceNodeId", std::to_string(parentId)}}};    
+      instanceJson["attrs"] = llvm::json::Array {
+        llvm::json::Object{{"key", "type"}, {"value", "Lower Level"}}};
+    } else {
+       instanceJson["attrs"] = llvm::json::Array {
+        llvm::json::Object{{"key", "type"}, {"value", "Top Level"}}};
+    }
+    outputJsonObjects.push_back(std::move(instanceJson));  
   }
 };
 
@@ -212,15 +207,28 @@ protected:
 class OperationGraphGenerator : public GraphGenerator {
 public:
   OperationGraphGenerator(mlir::Operation *baseModule, llvm::raw_ostream *os)
-      : GraphGenerator(baseModule, os) {}
+      : GraphGenerator(os), baseModule(baseModule) {}
 
-protected:
+  std::string generateGraphJson() override {
+    initializeModules();
+    while (!modulesToProcess.empty()) {
+      auto nextPair = modulesToProcess.top();
+      modulesToProcess.pop();
+      processModule(nextPair.first, nextPair.second);
+    }
+    return wrapJson(outputJsonObjects);
+  }
+
+protected:  
+  mlir::Operation *baseModule;
+  std::stack<std::pair<mlir::Operation *, std::string>> modulesToProcess;
+
   llvm::DenseMap<NodeRef, std::vector<NodeRef>> incomingEdges;
   HWModuleOpJSONGraphTraits jsonGraphTraits;
 
   // In addition to module discovery, assign unique IDs to all operations and
   // populate intra-module dependency edges.
-  void initializeModules() override {
+  void initializeModules() {
     int64_t counter = 0;
     baseModule->walk([&](mlir::Operation *op) {
       auto id = mlir::IntegerAttr::get(
@@ -264,7 +272,7 @@ protected:
 
   // Process a module by iterating over its operations and generating JSON
   // nodes.
-  void processModule(mlir::Operation *module, const std::string &ns) override {
+  void processModule(mlir::Operation *module, const std::string &ns) {
     if (!module) {
       llvm::json::Object moduleJson{{"id", getUniqueId(module, ns)},
                                     {"label", "Unknown Module"},
@@ -274,15 +282,7 @@ protected:
     }
 
     forEachOperation(
-        module, [&](mlir::Operation &op) {
-          NodeRef node = &op;
-          auto moduleOp = mlir::dyn_cast<hw::HWModuleOp>(module);
-          llvm::json::Object jsonObj{
-              {"label", jsonGraphTraits.getNodeLabel(node, moduleOp)},
-              {"attrs", jsonGraphTraits.getNodeAttributes(node, moduleOp)},
-              {"id", getUniqueId(node, ns)},
-              {"namespace", ns}};
-
+        module, [&](mlir::Operation &op) {   
           if (auto instanceOp = dyn_cast<InstanceOp>(&op)) {
             if (os)
               *os << "Found InstanceOp: "
@@ -293,29 +293,20 @@ protected:
             if (moduleMap.count(refModuleName))
               modulesToProcess.push({moduleMap[refModuleName], newNamespace});
             else
-              modulesToProcess.push({nullptr, newNamespace});
-            // Inter-module dependency.
-            jsonObj["incomingEdges"] = llvm::json::Array{llvm::json::Object{
-                {"sourceNodeId", getUniqueId(moduleMap[refModuleName],
-                                             ns + "/" + refModuleName)},
-                {"sourceNodeOutputId", "0"},
-                {"targetNodeInputId", "0"}}};
+              modulesToProcess.push({nullptr, newNamespace});            
           } else {
             // Intra-module dependency.
-            jsonObj["incomingEdges"] = getIncomingEdges(node, moduleOp, ns);
-          }
-          outputJsonObjects.push_back(std::move(jsonObj));
-        });
-        
-    // Also add a JSON node for the module itself.
-    auto moduleOp = mlir::dyn_cast<hw::HWModuleOp>(module);
-    llvm::json::Object moduleJson{
-        {"id", getUniqueId(module, ns)},
-        {"namespace", ns},
-        {"label", moduleOp.getNameAttr().getValue()},
-        {"attrs", jsonGraphTraits.getNodeAttributes(module, moduleOp)},
-        {"incomingEdges", getIncomingEdges(module, moduleOp, ns)}};
-    outputJsonObjects.push_back(std::move(moduleJson));
+            auto moduleOp = mlir::dyn_cast<hw::HWModuleOp>(module);
+            NodeRef node = &op;   
+            llvm::json::Object jsonObj{
+              {"label", jsonGraphTraits.getNodeLabel(node, moduleOp)},
+              {"attrs", jsonGraphTraits.getNodeAttributes(node, moduleOp)},
+              {"id", getUniqueId(node, ns)},
+              {"namespace", ns},
+              {"incomingEdges", getIncomingEdges(node, moduleOp, ns)}};
+            outputJsonObjects.push_back(std::move(jsonObj));
+          }          
+        });        
   }
 
   // Generate incoming edge JSON for a node.
@@ -358,6 +349,118 @@ protected:
   }
 };
 
+// Graph generator for Diff Graphs.
+class InstanceDiffGraphGenerator : GraphGenerator {
+public:
+  InstanceDiffGraphGenerator(mlir::Operation *baseOriginalModule, mlir::Operation *baseNewModule, llvm::raw_ostream *os)
+      : GraphGenerator(os), baseOriginalModule(baseOriginalModule), baseNewModule(baseNewModule) {}
+  
+  std::string generateGraphJson() override {
+    /*// Discover all modules to graph.
+    forEachOperation(baseOperation, [&](mlir::Operation &op) {
+      llvm::TypeSwitch<mlir::Operation *>(&op)
+          .Case<hw::HWModuleOp>([&](auto module) {
+            if (os)
+              *os << "Found HWModuleOp: " << module.getName() << "\n";
+            moduleMap[module.getName()] = &op;
+          })
+          .Case<hw::HWModuleExternOp>([&](auto module) {
+            if (os)
+              *os << "Found HWModuleExternOp: " << module.getName() << "\n";
+            moduleMap[module.getName()] = &op;
+          })
+          .Case<hw::HWModuleGeneratedOp>([&](auto module) {
+            if (os)
+              *os << "Found HWModuleGeneratedOp: " << module.getName() << "\n";
+            moduleMap[module.getName()] = &op;
+          })
+          .Default([&](auto) {
+            if (os)
+              *os << "Found unknown module type: " << op.getName() << "\n";            
+            moduleMap[op.getName().getStringRef()] = &op;
+          });
+    });
+
+    // Process modules.
+    std::stack<std::tuple<mlir::Operation *, std::string, int64_t>> treesToProcess;
+
+    for (auto const &entry : moduleMap) {
+      mlir::Operation *baseModule = moduleMap[entry.getKey()];
+      treesToProcess.push({baseModule, entry.getKey().str(), -1});
+
+      //if (os)
+      //  *os << "Queuing top level Module - Name: "
+      //      << entry.getKey() << " Type: " << baseModule->getName() << "\n";   
+    }
+
+    while (treesToProcess.size() > 0)
+    {
+      mlir::Operation *module;
+      std::string currentNamespace;
+      int64_t parentId;
+
+      std::tie(module, currentNamespace, parentId) = treesToProcess.top();
+      treesToProcess.pop();    
+
+      // Iterate over sub-operations to find instances.
+      bool hasInstances = false;
+      int64_t instanceChoiceId = 0;
+      forEachOperation(module, [&](mlir::Operation &op) {
+        if (auto instance = dyn_cast<InstanceOp>(&op)) {      
+          // Generate model explorer node      
+          generateInstanceNode(instance.getReferencedModuleName(), nextNodeId, currentNamespace, parentId);
+          // Push back for processing of children
+          if (moduleMap.count(instance.getReferencedModuleName()))
+            treesToProcess.push({moduleMap[instance.getReferencedModuleName()], currentNamespace, nextNodeId});
+          nextNodeId++;        
+          hasInstances = true;
+        } else if (auto choiceInstance = dyn_cast<InstanceChoiceOp>(&op)) {
+          mlir::ArrayAttr moduleNames = choiceInstance.getModuleNamesAttr();
+          std::string newNamespace = currentNamespace + "/CHOICE (" +
+                                      std::to_string(instanceChoiceId) + ")";
+          for (auto attr : moduleNames) {
+            llvm::StringRef instanceName = cast<FlatSymbolRefAttr>(attr).getAttr().getValue();
+            generateInstanceNode(instanceName, nextNodeId, newNamespace, parentId);
+            if (moduleMap.count(instanceName))
+              treesToProcess.push({moduleMap[instanceName], newNamespace, nextNodeId});      
+            nextNodeId++;   
+          }
+          instanceChoiceId++;
+          hasInstances = true;
+        }
+      });
+
+      // If this is a top level and independant module, we will display appropriate node.
+      if (!hasInstances && parentId == -1)
+      {      
+        llvm::json::Object moduleJson{{"id", std::to_string(nextNodeId)},
+                                      {"namespace", currentNamespace},
+                                      {"attrs", llvm::json::Array {
+                                        llvm::json::Object{
+                                          {"key", "type"}, 
+                                          {"value", "Top Level"}}}}};        
+        llvm::TypeSwitch<mlir::Operation *>(module)
+            .Case<hw::HWModuleOp>(
+                [&](auto mod) { moduleJson["label"] = "Self-Contained"; })
+            .Case<hw::HWModuleExternOp>(
+                [&](auto mod) { moduleJson["label"] = "External"; })
+            .Case<hw::HWModuleGeneratedOp>(
+                [&](auto mod) { moduleJson["label"] = "External (Generated)"; })
+            .Default([&](auto mod) { moduleJson["label"] = "Unknown Module"; });
+        outputJsonObjects.push_back(std::move(moduleJson));
+        nextNodeId++;
+      }
+    }   
+    */
+    return wrapJson(outputJsonObjects);    
+  }
+
+protected:
+  mlir::Operation *baseOriginalModule;
+  mlir::Operation *baseNewModule;  
+  std::stack<std::pair<mlir::Operation *, int64_t>> modulesToProcess;
+};
+
 } // end anonymous namespace
 
 namespace circt {
@@ -373,6 +476,12 @@ std::string MlirToInstanceGraphJson(mlir::Operation *baseModule,
 std::string MlirToOperationGraphJson(mlir::Operation *baseModule,
                                      llvm::raw_ostream *os) {
   OperationGraphGenerator generator(baseModule, os);
+  return generator.generateGraphJson();
+}
+
+std::string MlirInstanceDiffGraphJson(mlir::Operation *baseOriginalModule, mlir::Operation *baseNewModule,
+                                     llvm::raw_ostream *os) {\
+  InstanceDiffGraphGenerator generator(baseOriginalModule, baseNewModule, os);
   return generator.generateGraphJson();
 }
 
