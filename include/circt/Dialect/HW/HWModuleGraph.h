@@ -206,13 +206,16 @@ struct circt::hw::JSONGraphTraits<circt::hw::HWModuleOp>
           return llvm::json::Array(
               {llvm::json::Object(
                    {{"key", "fillcolor"}, {"value", "darkgoldenrod1"}}),
-               llvm::json::Object({{"key", "style"}, {"value", "filled"}})});
+               llvm::json::Object({{"key", "style"}, {"value", "filled"}}),
+               llvm::json::Object({{"key", "type"}, {"value", "hw"}})
+              });
         })
         .Case<circt::comb::MuxOp>([&](auto op) -> llvm::json::Array {
           return llvm::json::Array({
               llvm::json::Object({{"key", "shape"}, {"value", "invtrapezium"}}),
               llvm::json::Object({{"key", "fillcolor"}, {"value", "bisque"}}),
               llvm::json::Object({{"key", "style"}, {"value", "filled"}}),
+              llvm::json::Object({{"key", "type"}, {"value", "comb"}})
           });
         })
         .Case<circt::hw::OutputOp>([&](auto op) -> llvm::json::Array {
@@ -220,6 +223,7 @@ struct circt::hw::JSONGraphTraits<circt::hw::HWModuleOp>
               llvm::json::Object(
                   {{"key", "fillcolor"}, {"value", "lightblue"}}),
               llvm::json::Object({{"key", "style"}, {"value", "filled"}}),
+              llvm::json::Object({{"key", "type"}, {"value", "hw"}})
           });
         })
         .Default([&](auto op) -> llvm::json::Array {
@@ -231,6 +235,7 @@ struct circt::hw::JSONGraphTraits<circt::hw::HWModuleOp>
                     llvm::json::Object(
                         {{"key", "fillcolor"}, {"value", "bisque"}}),
                     llvm::json::Object({{"key", "style"}, {"value", "filled"}}),
+                    llvm::json::Object({{"key", "type"}, {"value", "comb"}})
                 });
               })
               .template Case<circt::seq::SeqDialect>([&](auto)
@@ -240,12 +245,17 @@ struct circt::hw::JSONGraphTraits<circt::hw::HWModuleOp>
                     llvm::json::Object(
                         {{"key", "fillcolor"}, {"value", "gainsboro"}}),
                     llvm::json::Object({{"key", "style"}, {"value", "filled"}}),
+                    llvm::json::Object({{"key", "type"}, {"value", "seq"}})
                 });
               })
               .Default([&](auto) -> llvm::json::Array {
                 return llvm::json::Array();
               });
         });
+  }
+
+  llvm::json::Array getInputNodeAttributes() {
+    return llvm::json::Array({llvm::json::Object({{"key", "type"}, {"value", "I/O"}})});
   }
 
   template <typename Iterator>
