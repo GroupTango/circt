@@ -225,6 +225,7 @@ protected:
 
   llvm::DenseMap<NodeRef, std::vector<NodeRef>> incomingEdges;
   llvm::DenseMap<NodeRef, std::vector<std::string>> incomingInputEdges;
+  llvm::StringMap<std::vector<NodeRef>> outputIncomingEdges;
   HWModuleOpJSONGraphTraits jsonGraphTraits;
 
   /// Discover all top-level modules, assign unique IDs to all operations via
@@ -284,47 +285,53 @@ protected:
       outputJsonObjects.push_back(std::move(moduleJson));
       return;
     }
+    auto moduleOp = mlir::dyn_cast<HWModuleOp>(module);
+    circt::hw::ModulePortInfo iports(moduleOp.getPortList());
 
     // Process child operations
     forEachOperation(
         module, [&](mlir::Operation &op) {   
-          NodeRef node = &op;   
-          if (auto instanceOp = dyn_cast<InstanceOp>(&op)) {
-            if (os)
-              *os << "Found InstanceOp: "
-                  << instanceOp.getReferencedModuleName() << "\n";
-            std::string refModuleName =
-                instanceOp.getReferencedModuleName().str();
-            
-            // TEMP FIX: Do not do recursive modules. Instead, just do an hw.instance(ReferencedModuleName)
-            // and point to it the correct inputs, as well as a copy of the referenced module.
+          NodeRef node = &op;
+          return llvm::TypeSwitch<NodeRef, void>(node)
+              .Case<circt::hw::InstanceOp>(
+                  [&](InstanceOp op) { 
+                    // if (os)
+                    //   *os << "Found InstanceOp: "
+                    //       << op.getReferencedModuleName() << "\n";
+                    std::string refModuleName =
+                        op.getReferencedModuleName().str();
+                    
+                    // TEMP FIX: Do not do recursive modules. Instead, just do an hw.instance(ReferencedModuleName)
+                    // and point to it the correct inputs, as well as a copy of the referenced module.
 
-            // std::string newNamespace = ns + "/" + refModuleName;
-            // if (moduleMap.count(refModuleName))
-            //   modulesToProcess.push({moduleMap[refModuleName], newNamespace});
-            // else
-            //   modulesToProcess.push({nullptr, newNamespace});
+                    // std::string newNamespace = ns + "/" + refModuleName;
+                    // if (moduleMap.count(refModuleName))
+                    //   modulesToProcess.push({moduleMap[refModuleName], newNamespace});
+                    // else
+                    //   modulesToProcess.push({nullptr, newNamespace});
 
-            llvm::json::Object jsonObj{
-              {"label", refModuleName},
-              {"attrs", llvm::json::Array({
-                llvm::json::Object({{"key", "type"}, {"value", "instance"}})
-              })},
-              {"id", getUniqueId(&op, ns)},
-              {"namespace", ns},
-              {"incomingEdges", getIncomingEdges(node, ns)}};
-            outputJsonObjects.push_back(std::move(jsonObj));
-          } else {
-            // Intra-module dependency.
-            auto moduleOp = mlir::dyn_cast<hw::HWModuleOp>(module);
-            llvm::json::Object jsonObj{
-              {"label", jsonGraphTraits.getNodeLabel(node, moduleOp)},
-              {"attrs", jsonGraphTraits.getNodeAttributes(node, moduleOp)},
-              {"id", getUniqueId(node, ns)},
-              {"namespace", ns},
-              {"incomingEdges", getIncomingEdges(node, ns)}};
-            outputJsonObjects.push_back(std::move(jsonObj));
-          }          
+                    llvm::json::Object jsonObj{
+                      {"label", refModuleName},
+                      {"attrs", llvm::json::Array({
+                        llvm::json::Object({{"key", "type"}, {"value", "instance"}})
+                      })},
+                      {"id", getUniqueId(op, ns)},
+                      {"namespace", ns},
+                      {"incomingEdges", getIncomingEdges(node, ns)}};
+                    outputJsonObjects.push_back(std::move(jsonObj));
+                  })
+              .Case<circt::hw::OutputOp>([&](OutputOp &op) { 
+                    processOutputs(module, op, ns);
+                  })
+              .Default([&](NodeRef op) { 
+                    llvm::json::Object jsonObj{
+                      {"label", jsonGraphTraits.getNodeLabel(node, moduleOp)},
+                      {"attrs", jsonGraphTraits.getNodeAttributes(node, moduleOp)},
+                      {"id", getUniqueId(node, ns)},
+                      {"namespace", ns},
+                      {"incomingEdges", getIncomingEdges(node, ns)}};
+                    outputJsonObjects.push_back(std::move(jsonObj));
+                  });         
         });
         
   }
@@ -356,6 +363,25 @@ protected:
     return edges;
   }
 
+  llvm::json::Array getOutputIncomingEdges(mlir::Value &outputOper, 
+                                          std::string &outputId, 
+                                          const std::string &ns) {
+    NodeRef operSource = outputOper.getDefiningOp();
+    outputIncomingEdges[outputId].push_back(operSource);
+    if (os) 
+      *os << "Operation " << operSource->getName().getStringRef().str() << " used output port " << outputId << "\n";
+    
+    llvm::json::Array edges;
+    for (NodeRef parent : outputIncomingEdges[outputId]) {
+      edges.push_back(
+          llvm::json::Object{{"sourceNodeId", getUniqueId(parent, ns)},
+                             {"sourceNodeOutputId", "0"},
+                             {"targetNodeInputId", "0"}});
+    }
+    outputIncomingEdges.erase(outputId);
+    return edges;
+  }
+
   // For HWModuleOp: Process input ports
   void processInputs(
       mlir::Operation *module,
@@ -364,8 +390,10 @@ protected:
     circt::hw::ModulePortInfo iports(moduleOp.getPortList());
 
     // generate input nodes as well as their outgoing edges
+    mlir::Block::BlockArgListType module_args = moduleOp.getBodyBlock()->getArguments();
+    
     for (auto [info, arg] :
-          llvm::zip(iports.getInputs(), moduleOp.getBodyBlock()->getArguments())) {
+          llvm::zip(iports.getInputs(), module_args)) {
       std::string inputName = info.getName().str();
       std::string inputId = ns + "_" + inputName;
       llvm::json::Object jsonObj{
@@ -378,12 +406,30 @@ protected:
         incomingInputEdges[user].push_back(inputName);
       }
     }
-    for (auto info : iports.getOutputs()) {
-      std::string outputName = info.getName().str();
-    }
 
     // TODO: figure out a compromise for generating edges from parent module ops to child input nodes
     
+  }
+
+  // For each operand of hw.output: Process output ports
+  void processOutputs(
+    mlir::Operation *module,
+    circt::hw::OutputOp output,
+    const std::string &ns) {
+      auto moduleOp = mlir::dyn_cast<circt::hw::HWModuleOp>(module);
+      circt::hw::ModulePortInfo iports(moduleOp.getPortList());
+      for (auto [outputOper, info] : 
+          llvm::zip(output.getOperands(), iports.getOutputs())) {
+        std::string outputName = info.getName().str();
+        std::string outputId = ns + "_" + outputName;
+        llvm::json::Object jsonObj{
+          {"label", outputName},
+          {"attrs", jsonGraphTraits.getInputNodeAttributes()},
+          {"id", outputId},
+          {"namespace", ns},
+          {"incomingEdges", getOutputIncomingEdges(outputOper, outputId, ns)}};
+        outputJsonObjects.push_back(std::move(jsonObj));
+      }
   }
 
   // Populate incoming edge relationships using GraphTraits.
