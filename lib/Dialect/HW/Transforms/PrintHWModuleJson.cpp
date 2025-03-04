@@ -35,13 +35,19 @@ struct PrintHWModuleJsonPass
 
   void runOnOperation() override {
     mlir::Operation *baseOp = getOperation();
-    const std::string Json = circt::hw::MlirToOperationGraphJson(baseOp, &os);
+    const std::string json = circt::hw::MlirToOperationGraphJson(baseOp, &os);
 
-    os << "JSON:\n\n";
-    os << Json;
-
-    // New lines to space out raw MLIR in case we print it.
-    os << "\n\n";
+    if (!outFile.empty()) {
+      std::error_code error;
+      llvm::raw_fd_ostream file(outFile, error);
+      if (error) {
+        os << "Error opening file: " << error.message() << "\n";
+        return;
+      }
+      file << json;
+    } else {
+      os << json;
+    }
   } // namespace
 
   raw_ostream &os;

@@ -31,6 +31,11 @@ using NodeRef = mlir::Operation *;
 using HWModuleOpGraphTraits = llvm::GraphTraits<hw::HWModuleOp>;
 using HWModuleOpJSONGraphTraits = hw::JSONGraphTraits<hw::HWModuleOp>;
 
+llvm::cl::opt<std::string> outFile("outfile",
+                                   llvm::cl::desc("Specify output file"),
+                                   llvm::cl::value_desc("filename"),
+                                   llvm::cl::init("out.json"));
+
 namespace {
 
 template <typename Fn>
@@ -68,8 +73,9 @@ protected:
 
     std::string jsonString;
     llvm::raw_string_ostream jsonStream(jsonString);
-    jsonStream << llvm::json::Value(std::move(fileArrayWrapper));
-    return jsonString;
+    llvm::json::OStream jso(jsonStream, /*IndentSize=*/2);
+    jso.value(llvm::json::Value(std::move(fileArrayWrapper)));
+    return jsonStream.str();
   }
 
   // Generate a unique ID for a node using its existing attribute if present.
