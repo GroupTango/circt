@@ -38,6 +38,7 @@ llvm::cl::opt<std::string> outFile("outfile",
 
 namespace {
 
+// Shallow iteration over all operations in the top-level module.
 template <typename Fn>
 void forEachOperation(NodeRef op, Fn f) {
   for (mlir::Region &region : op->getRegions())
@@ -80,8 +81,12 @@ protected:
 
   // Generate a unique ID for a node using its existing attribute if present.
   std::string getUniqueId(NodeRef node, const std::string &ns) {
+    if (ns.empty())
+      return NULL;
+
     if (!node)
       return ns + "_" + std::to_string(nextNodeId++);
+
     return ns + "_" +
            std::to_string(
                mlir::cast<IntegerAttr>(node->getAttr("hw.unique_id")).getInt());
@@ -229,34 +234,62 @@ public:
 
   std::string generateGraphJson() override {
     initializeModules();
-    while (!modulesToProcess.empty()) {
-      auto nextPair = modulesToProcess.top();
-      modulesToProcess.pop();
-      processModule(nextPair.first, nextPair.second);
+
+    while (!modulesToDrawIO.empty()) {
+      auto [module, ns, parent_instance, parent_ns] =
+          modulesToDrawIO.top(); // requires C++17
+      if (parent_ns.empty()) {
+        processGraphJson();
+        resetIOEdgeMaps();
+      }
+      modulesToDrawIO.pop();
+      drawModuleIO(module, ns, parent_instance, parent_ns);
     }
+    processGraphJson();
     processCombGroups();
     updateIncomingEdges();
     return wrapJson(outputJsonObjects);
   }
 
+  void processGraphJson() {
+    while (!modulesToProcess.empty()) {
+      auto [module, ns, parent_instance, parent_ns] = modulesToProcess.front();
+      modulesToProcess.pop_front();
+      processModule(module, ns, parent_instance, parent_ns);
+    }
+  }
+
 protected:
   NodeRef baseModule;
-  std::stack<std::pair<NodeRef, std::string>> modulesToProcess;
+  std::stack<std::tuple<NodeRef, std::string, NodeRef, std::string>>
+      modulesToDrawIO;
+  std::deque<std::tuple<NodeRef, std::string, NodeRef, std::string>>
+      modulesToProcess;
 
+  // lmao this is such wack code. can probably use a union or sth
   llvm::DenseMap<NodeRef, std::vector<NodeRef>> incomingEdges;
+  // incomingFromIOEdges[Node] = vector[ (name of IO port, namespace diff
+  // between node and IO port) ]
+  llvm::DenseMap<NodeRef, std::set<std::pair<std::string, std::string>>>
+      incomingFromIOEdges;
+  // ioIncomingEdges[ IO port ID ] = vector[ (Node, namespace) ]
+  llvm::StringMap<std::vector<std::pair<NodeRef, std::string>>> ioIncomingEdges;
+  // Currently used for output to input only. iOFromIOEdges[ Input port ID ] =
+  // vector[ Output port IDs ]
+  llvm::StringMap<std::vector<std::string>> iOFromIOEdges;
+  HWModuleOpJSONGraphTraits jsonGraphTraits;
   llvm::DenseMap<NodeRef, std::vector<std::string>> incomingInputEdges;
   llvm::StringMap<NodeRef> idToNodeMap;
   llvm::StringMap<std::vector<NodeRef>> outputIncomingEdges;
-  HWModuleOpJSONGraphTraits jsonGraphTraits;
 
   std::vector<std::pair<NodeRef, std::string>> combOps;
   std::map<std::string, std::string> combOpIdMap;
-  std::set<NodeRef> globalVisited;
+  std::set<std::pair<NodeRef, std::string>> globalVisited;
 
   /*
    * Collects a group of comb operations starting from the given operation.
    */
-  std::vector<NodeRef> collectCombGroup(NodeRef op) {
+  std::vector<NodeRef> collectCombGroup(NodeRef op, const std::string &ns) {
     std::stack<NodeRef> stack;
     std::vector<NodeRef> group;
     stack.push(op);
@@ -265,9 +298,10 @@ protected:
       NodeRef currentOp = stack.top();
       stack.pop();
 
-      if (this->globalVisited.count(currentOp))
+      if (this->globalVisited.count(
+              std::pair<NodeRef, std::string>(currentOp, ns)))
         continue;
-      globalVisited.insert(currentOp);
+      globalVisited.insert(std::pair<NodeRef, std::string>(currentOp, ns));
 
       if (isCombOp(currentOp))
         group.push_back(currentOp);
@@ -290,13 +324,13 @@ protected:
       NodeRef op = pair.first;
       std::string ns = pair.second;
 
-      if (globalVisited.count(op))
+      if (globalVisited.count(std::pair<NodeRef, std::string>(op, ns)))
         continue;
 
       if (incomingEdges[op].size() == 0)
         continue;
 
-      std::vector<NodeRef> group = collectCombGroup(incomingEdges[op][0]);
+      std::vector<NodeRef> group = collectCombGroup(incomingEdges[op][0], ns);
       if (group.size() == 0)
         continue;
 
@@ -308,6 +342,9 @@ protected:
         std::string combId = getUniqueId(combOp, groupNs);
         combOpIdMap[originalId] = combId;
 
+        *os << "Mapping comb op: originalId=" << originalId
+            << ", combId=" << combId << "\n";
+
         llvm::json::Object jsonObj{
             {"label", jsonGraphTraits.getNodeLabel(combOp, nullptr)},
             {"attrs", jsonGraphTraits.getNodeAttributes(combOp, nullptr)},
@@ -318,6 +355,19 @@ protected:
         idToNodeMap[combId] = combOp;
       }
     }
+  }
+
+  std::string getUniqueIOId(const std::string &portName,
+                            const std::string &ns) {
+    return ns + "_" + portName;
+  }
+
+  // This function is necessary as all the IO edge maps store the IO nodes'
+  // (namespaced) IDs, not labels.
+  void resetIOEdgeMaps() {
+    iOFromIOEdges.clear();
+    ioIncomingEdges.clear();
+    incomingFromIOEdges.clear();
   }
 
   /// Discover all top-level modules, assign unique IDs to all operations via
@@ -342,93 +392,113 @@ protected:
           .Case<hw::HWModuleExternOp>([&](auto module) {
             if (os)
               *os << "Found HWModuleExternOp: " << module.getName() << "\n";
-            modulesToProcess.push({nullptr, module.getName().str()});
+            modulesToProcess.push_back(
+                {nullptr, module.getName().str(), nullptr, ""});
           })
           .Case<hw::HWModuleGeneratedOp>([&](auto module) {
             if (os)
               *os << "Found HWModuleGeneratedOp: " << module.getName() << "\n";
-            modulesToProcess.push({nullptr, module.getName().str()});
+            modulesToProcess.push_back(
+                {nullptr, module.getName().str(), nullptr, ""});
           })
           .Default([&](auto) {
             if (os)
               *os << "Found unknown module: " << op.getName() << "\n";
-            modulesToProcess.push({nullptr, op.getName().getStringRef().str()});
+            modulesToProcess.push_back(
+                {nullptr, op.getName().getStringRef().str(), nullptr, ""});
           });
     });
 
     for (auto const &entry : moduleMap) {
       NodeRef op = moduleMap[entry.getKey()];
       std::string namespaceStr = entry.getKey().str();
-      modulesToProcess.push({op, namespaceStr});
-      processInputs(op, namespaceStr);
+      modulesToDrawIO.push({op, namespaceStr, nullptr, ""});
       if (os)
-        *os << "Adding top level Module for processing - Name: "
+        *os << "Adding top level Module for "
+               "processing - Name: "
             << entry.getKey() << " Type: " << op->getName() << "\n";
     }
   }
 
-  // Process a module by iterating over its operations and generating JSON
-  // nodes.
-  void processModule(NodeRef module, const std::string &ns) {
+  void drawModuleIO(NodeRef module, const std::string &ns,
+                    NodeRef parentInstance, const std::string &parentNs) {
+    if (!module) {
+      return;
+    }
+    auto moduleOp = mlir::dyn_cast<circt::hw::HWModuleOp>(module);
+
+    *os << "Now drawing IO for module " << moduleOp.getName().str()
+        << " with namespace " << ns << " and parent namespace " << parentNs
+        << "\n";
+
+    // Process inputs and outputs
+
+    if (parentInstance) {
+      drawInputs(moduleOp, ns, parentInstance, parentNs);
+    } else {
+      drawInputs(moduleOp, ns, nullptr, "");
+    }
+
+    forEachOperation(module, [&](mlir::Operation &op) {
+      if (auto outputOp = mlir::dyn_cast<OutputOp>(op)) {
+        drawOutputs(outputOp, moduleOp, ns, parentInstance, parentNs);
+      }
+    });
+
+    modulesToProcess.push_back({moduleOp, ns, parentInstance, parentNs});
+
+    forEachOperation(module, [&](mlir::Operation &op) {
+      NodeRef node = &op;
+      if (InstanceOp op = mlir::dyn_cast<InstanceOp>(node)) {
+        std::string refModuleName = op.getReferencedModuleName().str();
+        std::string instanceName = op.getInstanceName().str();
+        std::string newNs = ns + "/" + refModuleName + "_" + instanceName;
+        if (moduleMap.count(refModuleName))
+          modulesToDrawIO.push({moduleMap[refModuleName], newNs, node, ns});
+        else
+          modulesToDrawIO.push({nullptr, newNs, node, ns});
+      }
+    });
+  }
+
+  // Process a module by iterating over its operations
+  // and generating JSON nodes.
+  void processModule(NodeRef module, const std::string &ns,
+                     NodeRef parentInstance, const std::string &parentNs) {
     if (!module) {
       llvm::json::Object moduleJson{{"id", getUniqueId(module, ns)},
                                     {"label", "Unknown Module"},
                                     {"namespace", ns}};
       outputJsonObjects.push_back(std::move(moduleJson));
+      idToNodeMap[getUniqueId(module, ns)] = module;
       return;
     }
-    auto moduleOp = mlir::dyn_cast<HWModuleOp>(module);
-    circt::hw::ModulePortInfo iports(moduleOp.getPortList());
+    auto moduleOp = mlir::dyn_cast<circt::hw::HWModuleOp>(module);
 
-    // Process child operations
+    *os << "Now processing " << moduleOp.getName().str() << " with namespace "
+        << ns << " and parent namespace " << parentNs << "\n";
+
+    if (parentInstance)
+      processInputs(moduleOp, ns, parentInstance, parentNs);
+    else
+      processInputs(moduleOp, ns, nullptr, "");
+    processOutputs(moduleOp, ns, parentInstance, parentNs);
+
+    // MAIN LOOP: Process child operations
     forEachOperation(module, [&](mlir::Operation &op) {
       NodeRef node = &op;
-      return llvm::TypeSwitch<NodeRef, void>(node)
-          .Case<circt::hw::InstanceOp>([&](InstanceOp op) {
-            // if (os)
-            //   *os << "Found InstanceOp: "
-            //       << op.getReferencedModuleName() << "\n";
-            std::string refModuleName = op.getReferencedModuleName().str();
-
-            // TEMP FIX: Do not do recursive modules. Instead, just do an
-            // hw.instance(ReferencedModuleName) and point to it the correct
-            // inputs, as well as a copy of the referenced module.
-
-            // std::string newNamespace = ns + "/" + refModuleName;
-            // if (moduleMap.count(refModuleName))
-            //   modulesToProcess.push({moduleMap[refModuleName],
-            //   newNamespace});
-            // else
-            //   modulesToProcess.push({nullptr, newNamespace});
-
-            llvm::json::Object jsonObj{
-                {"label", refModuleName},
-                {"attrs", llvm::json::Array({llvm::json::Object(
-                              {{"key", "type"}, {"value", "instance"}})})},
-                {"id", getUniqueId(op, ns)},
-                {"namespace", ns},
-            };
-            outputJsonObjects.push_back(std::move(jsonObj));
-            idToNodeMap[getUniqueId(op, ns)] = op;
-          })
-          .Case<circt::hw::OutputOp>(
-              [&](OutputOp &op) { processOutputs(module, op, ns); })
-          .Default([&](NodeRef op) {
-            // We collect comb ops to be grouped later.
-            if (op->getDialect() &&
-                op->getDialect()->getNamespace() == "comb") {
-              combOps.push_back(std::pair<NodeRef, std::string>(op, ns));
-            } else {
-              llvm::json::Object jsonObj{
-                  {"label", jsonGraphTraits.getNodeLabel(node, moduleOp)},
-                  {"attrs", jsonGraphTraits.getNodeAttributes(node, moduleOp)},
-                  {"id", getUniqueId(node, ns)},
-                  {"namespace", ns},
-              };
-              outputJsonObjects.push_back(std::move(jsonObj));
-              idToNodeMap[getUniqueId(node, ns)] = node;
-            }
-          });
+      // We collect comb ops to be grouped later.
+      if (node->getDialect() && node->getDialect()->getNamespace() == "comb") {
+        combOps.push_back(std::pair<NodeRef, std::string>(node, ns));
+      } else {
+        llvm::json::Object jsonObj{
+            {"label", jsonGraphTraits.getNodeLabel(node, moduleOp)},
+            {"attrs", jsonGraphTraits.getNodeAttributes(node, moduleOp)},
+            {"id", getUniqueId(node, ns)},
+            {"namespace", ns}};
+        outputJsonObjects.push_back(std::move(jsonObj));
+        idToNodeMap[getUniqueId(node, ns)] = node;
+      }
     });
   }
 
@@ -444,6 +514,13 @@ protected:
         if (lastSlashPos != std::string::npos)
           uniqueId = getUniqueId(parent, ns.substr(0, lastSlashPos));
       }
+
+      if (isCombOp(parent))
+        *os << "Looking up parent: originalId=" << uniqueId << ", found combId="
+            << (combOpIdMap.count(uniqueId) ? combOpIdMap[uniqueId]
+                                            : "NOT FOUND")
+            << "\n";
+
       edges.push_back(llvm::json::Object{
           // If the parent is a comb op, we have to translate the original ID to
           // the ID within the comb group namespace.
@@ -451,17 +528,33 @@ protected:
           {"sourceNodeOutputId", "0"},
           {"targetNodeInputId", "0"}});
     }
-    for (std::string inputParent : incomingInputEdges[node]) {
-      edges.push_back(
-          llvm::json::Object{{"sourceNodeId", ns + "_" + inputParent},
-                             {"sourceNodeOutputId", "0"},
-                             {"targetNodeInputId", "0"}});
+    for (const std::pair<std::string, std::string> &iop :
+         incomingFromIOEdges[node]) {
+      std::string newNs = ns;
+      if (!iop.second.empty())
+        newNs = newNs + "/" + iop.second;
+      std::string ioPort = getUniqueIOId(iop.first, newNs);
+      edges.push_back(llvm::json::Object{{"sourceNodeId", ioPort},
+                                         {"sourceNodeOutputId", "0"},
+                                         {"targetNodeInputId", "0"}});
     }
-    if (auto instanceOp = llvm::dyn_cast_or_null<hw::InstanceOp>(node)) {
+    return edges;
+  }
+
+  llvm::json::Array getioIncomingEdges(const std::string &portId,
+                                       const std::string &ns) {
+    llvm::json::Array edges;
+    for (const std::pair<NodeRef, std::string> &parent :
+         ioIncomingEdges[portId]) {
       edges.push_back(llvm::json::Object{
-          {"sourceNodeId", instanceOp.getReferencedModuleName().str()},
+          {"sourceNodeId", getUniqueId(parent.first, parent.second)},
           {"sourceNodeOutputId", "0"},
           {"targetNodeInputId", "0"}});
+    }
+    for (std::string ioPort : iOFromIOEdges[portId]) {
+      edges.push_back(llvm::json::Object{{"sourceNodeId", ioPort},
+                                         {"sourceNodeOutputId", "0"},
+                                         {"targetNodeInputId", "0"}});
     }
     return edges;
   }
@@ -503,61 +596,284 @@ protected:
     }
   }
 
-  // For HWModuleOp: Process input ports
-  void processInputs(NodeRef module, const std::string &ns) {
-    auto moduleOp = mlir::dyn_cast<circt::hw::HWModuleOp>(module);
-    circt::hw::ModulePortInfo iports(moduleOp.getPortList());
-    if (iports.size() == 0)
+  /// Draw input nodes and populate all edges involving them
+  void drawInputs(circt::hw::HWModuleOp moduleOp, const std::string &ns,
+                  NodeRef parentInstance, const std::string &parentNs) {
+
+    circt::hw::ModulePortInfo ports(moduleOp.getPortList());
+    if (ports.sizeInputs() == 0)
       return;
+    auto inputPorts = ports.getInputs(); // returns InOut ports as
+                                         // well
+    auto moduleArgs = moduleOp.getBodyBlock()->getArguments();
+    bool isTopLevel = parentNs.empty();
 
-    // generate input nodes as well as their outgoing edges
-    mlir::Block::BlockArgListType module_args =
-        moduleOp.getBodyBlock()->getArguments();
+    for (auto [iport, arg] : llvm::zip(inputPorts, moduleArgs)) {
 
-    std::string inputNamespace = getInputNamespace(ns);
-    for (auto [info, arg] : llvm::zip(iports.getInputs(), module_args)) {
-      std::string inputName = info.getName().str();
-      std::string inputId = ns + "_" + inputName;
-      llvm::json::Object jsonObj{
-          {"label", inputName},
-          {"attrs", jsonGraphTraits.getInputNodeAttributes()},
-          {"id", inputId},
-          {"namespace", inputNamespace}};
-      outputJsonObjects.push_back(std::move(jsonObj));
+      // The input node itself
+      std::string iportName = iport.getName().str();
+
+      // Generate outgoing edges from the input node.
+      // These are always regular nodes from the same module.
+
       for (auto *user : arg.getUsers()) {
-        incomingInputEdges[user].push_back(inputName);
+        if (OutputOp destOutput = mlir::dyn_cast<OutputOp>(user)) {
+          // TODO: input that points directly to output
+        } else {
+          incomingFromIOEdges[user].emplace(std::make_pair(iportName, ""));
+        }
       }
     }
 
-    // TODO: figure out a compromise for generating edges from parent module
-    // ops to child input nodes
+    // Generate incoming edges into the input node.
+    // These affect iOFromIOEdges and ioIncomingEdges
+    if (!isTopLevel) {
+      auto parentInstanceOp =
+          mlir::dyn_cast<circt::hw::InstanceOp>(parentInstance);
+
+      for (auto [iport, arg, oper] :
+           llvm::zip(inputPorts, moduleArgs, parentInstanceOp.getOperands())) {
+
+        std::string iportName = iport.getName().str();
+        std::string iportId = getUniqueIOId(iportName, ns);
+        *os << "The input operand " << oper << " for port " << iportId;
+
+        if (NodeRef operSource = oper.getDefiningOp()) {
+
+          // The edge could come from the hw.output of
+          // another instance...
+          if (InstanceOp sourceInstance =
+                  mlir::dyn_cast<InstanceOp>(operSource)) {
+            *os << " comes from instance op\n";
+
+            circt::hw::ModulePortInfo ports(sourceInstance.getPortList());
+            llvm::SmallVector<mlir::Value> values;
+            sourceInstance.getValues(values, ports);
+
+            // sadly there is no better way to check
+            // exactly which output port it comes
+            // from, than to iterate over all the
+            // output values and identify the one with
+            // the same location
+            for (auto [port, val] :
+                 llvm::zip(sourceInstance.getPortList(), values)) {
+              if (port.dir == PortInfo::Direction::Output) {
+                if (oper.getLoc() == val.getLoc()) {
+                  std::string refModuleName =
+                      sourceInstance.getReferencedModuleName().str();
+                  std::string instanceName =
+                      sourceInstance.getInstanceName().str();
+                  std::string newNs =
+                      parentNs + "/" + refModuleName + "_" + instanceName;
+                  iOFromIOEdges[iportId].push_back(
+                      getUniqueIOId(port.getName().str(), newNs));
+                  break;
+                }
+              } else {
+                continue;
+              }
+            }
+
+            // ...or a plane jane Operation from the
+            // parent module...
+          } else {
+            ioIncomingEdges[iportId].push_back(
+                std::make_pair(operSource, parentNs));
+            *os << " comes from a plain jane "
+                   "operation "
+                << operSource->getName() << "\n";
+          }
+          // ...or a BlockArgument from the parent
+          // module
+        } else {
+          auto arg = dyn_cast<mlir::BlockArgument>(oper);
+          auto *parentModule = parentInstance->getParentOp();
+          if (auto parentModuleOp =
+                  mlir::dyn_cast<circt::hw::HWModuleOp>(parentModule)) {
+            std::string sourceIport =
+                parentModuleOp.getInputName(arg.getArgNumber()).str();
+            iOFromIOEdges[iportId].push_back(
+                getUniqueIOId(sourceIport, parentNs));
+            *os << " comes from a block argument\n";
+          } else {
+            *os << parentModule->getName() << " is not a HWModuleOp!\n";
+          }
+        }
+      }
+    }
   }
 
-  // For each operand of hw.output: Process output ports
-  void processOutputs(NodeRef module, circt::hw::OutputOp output,
-                      const std::string &ns) {
-    auto moduleOp = mlir::dyn_cast<circt::hw::HWModuleOp>(module);
+  /// Generate output node JSONs
+  void processInputs(circt::hw::HWModuleOp moduleOp, const std::string &ns,
+                     NodeRef parentInstance, const std::string &parentNs) {
 
-    circt::hw::ModulePortInfo oports(moduleOp.getPortList());
-    if (oports.size() == 0)
+    circt::hw::ModulePortInfo ports(moduleOp.getPortList());
+    if (ports.sizeInputs() == 0)
       return;
+    auto inputPorts = ports.getInputs(); // returns InOut ports as
+                                         // well
+    bool isTopLevel = parentNs.empty();
 
-    std::string outputNamespace = getOutputNamespace(ns);
-    for (auto [outputOper, info] :
-         llvm::zip(output.getOperands(), oports.getOutputs())) {
-      std::string outputName = info.getName().str();
-      std::string outputId = ns + "_" + outputName;
+    // Top-level input nodes don't have any incoming
+    // edges.
+    if (isTopLevel) {
+      for (auto iport : inputPorts) {
+        std::string iportName = iport.getName().str();
+        std::string iportId = getUniqueIOId(iportName, ns);
+        llvm::json::Object jsonObj{
+            {"label", iportName},
+            {"attrs", jsonGraphTraits.getInputNodeAttributes()},
+            {"id", iportId},
+            {"namespace", getIONamespace(iport, ns)}};
+        outputJsonObjects.push_back(std::move(jsonObj));
+      }
+
+      // Non-top-level input nodes have incoming
+      // edges.
+    } else {
+      for (auto iport : inputPorts) {
+        std::string iportName = iport.getName().str();
+        std::string iportId = getUniqueIOId(iportName, ns);
+        llvm::json::Object jsonObj{
+            {"label", iportName},
+            {"attrs", jsonGraphTraits.getInputNodeAttributes()},
+            {"id", iportId},
+            {"namespace", getIONamespace(iport, ns)},
+            {"incomingEdges", getioIncomingEdges(iportId, ns)}};
+        outputJsonObjects.push_back(std::move(jsonObj));
+      }
+    }
+  }
+
+  /// Draw output nodes and populate all edges
+  /// involving them
+  void drawOutputs(circt::hw::OutputOp output, circt::hw::HWModuleOp moduleOp,
+                   const std::string &ns, NodeRef parentInstance,
+                   const std::string &parentNs) {
+
+    circt::hw::ModulePortInfo ports(moduleOp.getPortList());
+    if (ports.sizeOutputs() == 0)
+      return;
+    auto outputPorts = ports.getOutputs();
+    bool isTopLevel = parentNs.empty();
+
+    // Generate output nodes
+    for (auto [outputOper, oport] :
+         llvm::zip(output.getOperands(), outputPorts)) {
+      std::string oportName = oport.getName().str();
+      std::string oportId = getUniqueIOId(oportName, ns);
+
+      if (NodeRef sourceOp = outputOper.getDefiningOp()) {
+        // Generate edges from generic nodes into our
+        // output node
+        ioIncomingEdges[oportId].push_back(std::make_pair(sourceOp, ns));
+
+        // TODO: special case where an input node
+        // leads directly into our output node
+      } else {
+        *os << "InOut port was detected as output "
+               "port "
+            << oportName << "\n";
+      }
+    }
+
+    // Generate edges from output nodes to other
+    // nodes. These affect incomingFromIOEdges and
+    // iOFromIOEdges
+    if (!isTopLevel) {
+      InstanceOp parentInstanceOp = mlir::dyn_cast<InstanceOp>(parentInstance);
+      std::string refModuleName =
+          parentInstanceOp.getReferencedModuleName().str();
+      std::string instanceName = parentInstanceOp.getInstanceName().str();
+
+      for (auto [outputOper, oport, result] :
+           llvm::zip(output.getOperands(), outputPorts,
+                     parentInstance->getResults())) {
+        std::string oportName = oport.getName().str();
+        std::string oportId = getUniqueIOId(oportName, ns);
+
+        *os << "Output operand " << oportName << " users in namespace "
+            << parentNs << ": ";
+        for (NodeRef user : result.getUsers()) {
+          *os << user->getName() << " ";
+
+          // Case 1: output points to another
+          // instance's input. Handled by drawInputs()
+          if (auto destInstance = mlir::dyn_cast<InstanceOp>(user)) {
+            *os << "(instance), ";
+
+            // Case 2: output points to parent
+            // module's output.
+          } else if (auto destOutput =
+                         mlir::dyn_cast<circt::hw::OutputOp>(user)) {
+            circt::hw::HWModuleOp parentModule = destOutput.getParentOp();
+            circt::hw::ModulePortInfo parentPorts(parentModule.getPortList());
+            auto parentOutputPorts = parentPorts.getOutputs();
+
+            // once again there is no better way to
+            // identify the correct output port of the
+            // parent module, than to iterate over all
+            // the output values and identify the one
+            // with the same location
+            *os << result.getLoc() << " ";
+            for (auto [destOper, destOport] :
+                 llvm::zip(destOutput.getOperands(), parentOutputPorts)) {
+              *os << destOper.getLoc() << " ";
+              if (result.getLoc() == destOper.getLoc()) {
+                std::string destPortId =
+                    getUniqueIOId(destOport.getName().str(), parentNs);
+                iOFromIOEdges[destPortId].push_back(oportId);
+                *os << "FOUND (" << destPortId << ", " << oportId << ") ";
+                break;
+              }
+            }
+            *os << "(parent output), ";
+
+            // Case 3: output points to generic node
+            // in the parent instance.
+          } else {
+            std::string nsDiff = refModuleName + "_" + instanceName;
+            incomingFromIOEdges[user].emplace(
+                std::make_pair(oportName, nsDiff));
+            *os << "(node), ";
+          }
+        }
+        *os << "\n";
+
+        // edges from output nodes to other input
+        // nodes
+      }
+    }
+    // TODO: figure out a compromise for generating
+    // edges from parent module ops to child input
+    // nodes
+  }
+
+  /// Generate output node JSONs
+  void processOutputs(circt::hw::HWModuleOp moduleOp, const std::string &ns,
+                      NodeRef parentInstance, const std::string &parentNs) {
+
+    circt::hw::ModulePortInfo ports(moduleOp.getPortList());
+    if (ports.sizeOutputs() == 0)
+      return;
+    auto outputPorts = ports.getOutputs();
+
+    // Generate output nodes
+    for (auto oport : outputPorts) {
+      std::string oportName = oport.getName().str();
+      std::string oportId = getUniqueIOId(oportName, ns);
       llvm::json::Object jsonObj{
-          {"label", outputName},
+          {"label", oportName},
           {"attrs", jsonGraphTraits.getInputNodeAttributes()},
-          {"id", outputId},
-          {"namespace", outputNamespace},
-          {"incomingEdges", getOutputIncomingEdges(outputOper, outputId, ns)}};
+          {"id", oportId},
+          {"namespace", getIONamespace(oport, ns)},
+          {"incomingEdges", getioIncomingEdges(oportId, ns)}};
       outputJsonObjects.push_back(std::move(jsonObj));
     }
   }
 
-  // Populate incoming edge relationships using GraphTraits.
+  // Populate incoming edge relationships for *non-IO
+  // operation nodes* using GraphTraits.
   void populateIncomingEdges(
       hw::HWModuleOp module,
       llvm::DenseMap<NodeRef, std::vector<NodeRef>> &edgesMap) {
@@ -577,17 +893,22 @@ protected:
                 end = HWModuleOpGraphTraits::child_end(current);
            it != end; ++it) {
         NodeRef child = *it;
-        edgesMap[child].push_back(current);
-        nodesToVisit.push(child);
+        if (auto c = mlir::dyn_cast<InstanceOp>(child)) {
+          // pass
+        } else {
+          edgesMap[child].push_back(current);
+          nodesToVisit.push(child);
+        }
       }
     }
   }
 
-  std::string getInputNamespace(const std::string &ns) {
-    return ns + "/Inputs";
-  }
-  std::string getOutputNamespace(const std::string &ns) {
-    return ns + "/Outputs";
+  std::string getIONamespace(circt::hw::PortInfo port, const std::string &ns) {
+    if (port.dir == ModulePort::Direction::Input)
+      return ns + "/Inputs";
+    if (port.dir == ModulePort::Direction::Output)
+      return ns + "/Outputs";
+    return ns + "/IONamespaceError";
   }
 };
 
