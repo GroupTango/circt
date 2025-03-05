@@ -17,6 +17,7 @@
 #include "circt/Dialect/HW/HWInstanceGraph.h"
 #include "circt/Dialect/HW/HWOps.h"
 #include "circt/Dialect/Seq/SeqOps.h"
+#include "circt/Support/JSONGraphTraits.h"
 #include "circt/Support/LLVM.h"
 #include "llvm/ADT/GraphTraits.h"
 #include "llvm/ADT/STLExtras.h"
@@ -24,6 +25,7 @@
 #include "llvm/ADT/iterator.h"
 #include "llvm/Support/DOTGraphTraits.h"
 #include "llvm/Support/GraphWriter.h"
+#include "llvm/Support/JSON.h"
 
 namespace circt {
 namespace hw {
@@ -188,6 +190,94 @@ struct llvm::DOTGraphTraits<circt::hw::HWModuleOp>
       os << " style=bold";
 
     return os.str();
+  }
+};
+
+template <>
+struct circt::hw::JSONGraphTraits<circt::hw::HWModuleOp>
+    : public llvm::DOTGraphTraits<circt::hw::HWModuleOp> {
+  JSONGraphTraits(bool isSimple = false) : DOTGraphTraits(isSimple) {}
+
+  // Same attributes from DOTGraphTraits, but in JSON format.
+  llvm::json::Array getNodeAttributes(circt::hw::detail::HWOperation *node,
+                                      HWModuleOp mod) {
+    return llvm::TypeSwitch<mlir::Operation *, llvm::json::Array>(node)
+        .Case<circt::hw::ConstantOp>([&](auto op) -> llvm::json::Array {
+          return llvm::json::Array(
+              {llvm::json::Object(
+                   {{"key", "fillcolor"}, {"value", "darkgoldenrod1"}}),
+               llvm::json::Object({{"key", "style"}, {"value", "filled"}}),
+               llvm::json::Object({{"key", "type"}, {"value", "hw"}})
+              });
+        })
+        .Case<circt::comb::MuxOp>([&](auto op) -> llvm::json::Array {
+          return llvm::json::Array({
+              llvm::json::Object({{"key", "shape"}, {"value", "invtrapezium"}}),
+              llvm::json::Object({{"key", "fillcolor"}, {"value", "bisque"}}),
+              llvm::json::Object({{"key", "style"}, {"value", "filled"}}),
+              llvm::json::Object({{"key", "type"}, {"value", "comb"}})
+          });
+        })
+        .Case<circt::hw::OutputOp>([&](auto op) -> llvm::json::Array {
+          return llvm::json::Array({
+              llvm::json::Object(
+                  {{"key", "fillcolor"}, {"value", "lightblue"}}),
+              llvm::json::Object({{"key", "style"}, {"value", "filled"}}),
+              llvm::json::Object({{"key", "type"}, {"value", "hw"}})
+          });
+        })
+        .Default([&](auto op) -> llvm::json::Array {
+          return llvm::TypeSwitch<mlir::Dialect *, llvm::json::Array>(
+                     op->getDialect())
+              .Case<circt::comb::CombDialect>([&](auto) -> llvm::json::Array {
+                return llvm::json::Array({
+                    llvm::json::Object({{"key", "shape"}, {"value", "oval"}}),
+                    llvm::json::Object(
+                        {{"key", "fillcolor"}, {"value", "bisque"}}),
+                    llvm::json::Object({{"key", "style"}, {"value", "filled"}}),
+                    llvm::json::Object({{"key", "type"}, {"value", "comb"}})
+                });
+              })
+              .template Case<circt::seq::SeqDialect>([&](auto)
+                                                         -> llvm::json::Array {
+                return llvm::json::Array({
+                    llvm::json::Object({{"key", "shape"}, {"value", "folder"}}),
+                    llvm::json::Object(
+                        {{"key", "fillcolor"}, {"value", "gainsboro"}}),
+                    llvm::json::Object({{"key", "style"}, {"value", "filled"}}),
+                    llvm::json::Object({{"key", "type"}, {"value", "seq"}})
+                });
+              })
+              .Default([&](auto) -> llvm::json::Array {
+                return llvm::json::Array();
+              });
+        });
+  }
+
+  llvm::json::Array getInputNodeAttributes() {
+    return llvm::json::Array({llvm::json::Object({{"key", "type"}, {"value", "I/O"}})});
+  }
+
+  template <typename Iterator>
+  llvm::json::Object getEdgeAttributes(circt::hw::detail::HWOperation *node,
+                                       Iterator it, HWModuleOp mod) {
+    mlir::OpOperand &operand = *it.getCurrent();
+    mlir::Value v = operand.get();
+    llvm::json::Object obj;
+
+    auto verboseEdges = mod->getAttrOfType<mlir::BoolAttr>("dot_verboseEdges");
+    if (verboseEdges.getValue()) {
+      std::string str;
+      llvm::raw_string_ostream os(str);
+      os << operand.getOperandNumber() << " (" << v.getType() << ")";
+      obj["label"] = os.str();
+    }
+
+    int64_t width = circt::hw::getBitWidth(v.getType());
+    if (width > 1)
+      obj["style"] = "bold";
+
+    return obj;
   }
 };
 

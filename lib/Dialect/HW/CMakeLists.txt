@@ -6,6 +6,7 @@ set(CIRCT_HW_Sources
   HWDialect.cpp
   HWInstanceGraph.cpp
   HWInstanceImplementation.cpp
+  HWModelExplorer.cpp
   HWModuleOpInterface.cpp
   HWOpInterfaces.cpp
   HWOps.cpp
