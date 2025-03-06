@@ -487,8 +487,15 @@ protected:
     // MAIN LOOP: Process child operations
     forEachOperation(module, [&](mlir::Operation &op) {
       NodeRef node = &op;
+      // Skip over hw.instance and hw.output: these are already handled by
+      // the recursive module functionality, and the output node drawer.
+      if (auto inst = mlir::dyn_cast<InstanceOp>(node)) {
+
+      } else if (auto output = mlir::dyn_cast<OutputOp>(node)) {
+
+      }
       // We collect comb ops to be grouped later.
-      if (node->getDialect() && node->getDialect()->getNamespace() == "comb") {
+      else if (node->getDialect() && node->getDialect()->getNamespace() == "comb") {
         combOps.push_back(std::pair<NodeRef, std::string>(node, ns));
       } else {
         llvm::json::Object jsonObj{
@@ -505,15 +512,16 @@ protected:
   // Generate incoming edge JSON for a node.
   llvm::json::Array getIncomingEdges(NodeRef node, const std::string &ns) {
     llvm::json::Array edges;
+    std::string ns1 = ns;
+    if (isCombOp(node)) {
+      // The node's namespace contains the comb group, we want the original
+      // namespace.
+      size_t lastSlashPos = ns.find_last_of('/');
+      if (lastSlashPos != std::string::npos)
+        ns1 = ns.substr(0, lastSlashPos);
+    }
     for (NodeRef parent : incomingEdges[node]) {
-      std::string uniqueId = getUniqueId(parent, ns);
-      if (isCombOp(node)) {
-        // The node's namespace contains the comb group, we want the original
-        // namespace.
-        size_t lastSlashPos = ns.find_last_of('/');
-        if (lastSlashPos != std::string::npos)
-          uniqueId = getUniqueId(parent, ns.substr(0, lastSlashPos));
-      }
+      std::string uniqueId = getUniqueId(parent, ns1);
 
       if (isCombOp(parent))
         *os << "Looking up parent: originalId=" << uniqueId << ", found combId="
@@ -530,13 +538,13 @@ protected:
     }
     for (const std::pair<std::string, std::string> &iop :
          incomingFromIOEdges[node]) {
-      std::string newNs = ns;
+      std::string newNs = ns1;
       if (!iop.second.empty())
         newNs = newNs + "/" + iop.second;
       std::string ioPort = getUniqueIOId(iop.first, newNs);
       edges.push_back(llvm::json::Object{{"sourceNodeId", ioPort},
                                          {"sourceNodeOutputId", "0"},
-                                         {"targetNodeInputId", "0"}});
+                                         {"targetNodeInputId", "1"}});
     }
     return edges;
   }
@@ -546,15 +554,16 @@ protected:
     llvm::json::Array edges;
     for (const std::pair<NodeRef, std::string> &parent :
          ioIncomingEdges[portId]) {
+      std::string uniqueId = getUniqueId(parent.first, parent.second);
       edges.push_back(llvm::json::Object{
-          {"sourceNodeId", getUniqueId(parent.first, parent.second)},
-          {"sourceNodeOutputId", "0"},
+          {"sourceNodeId", isCombOp(parent.first) ? combOpIdMap[uniqueId] : uniqueId},
+          {"sourceNodeOutputId", "1"},
           {"targetNodeInputId", "0"}});
     }
     for (std::string ioPort : iOFromIOEdges[portId]) {
       edges.push_back(llvm::json::Object{{"sourceNodeId", ioPort},
-                                         {"sourceNodeOutputId", "0"},
-                                         {"targetNodeInputId", "0"}});
+                                         {"sourceNodeOutputId", "1"},
+                                         {"targetNodeInputId", "1"}});
     }
     return edges;
   }
