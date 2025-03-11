@@ -406,8 +406,9 @@ protected:
         std::string id = obj->getString("id")->str();
         std::string ns = obj->getString("namespace")->str();
 
-        if (ns.rfind("/Outputs") == ns.size() - 8) {
-          std::string parentNs = ns.substr(0, ns.size() - 8);
+        if (ns.rfind("/Inputs") == ns.size() - 7 ||
+            ns.rfind("/Outputs") == ns.size() - 8) {
+          std::string parentNs = ns.substr(0, ns.find_last_of('/'));
           (*obj)["incomingEdges"] = getInputIncomingEdges(id, parentNs);
         } else if (idToNodeMap.count(id)) {
           (*obj)["incomingEdges"] = getIncomingEdges(idToNodeMap[id], ns);
