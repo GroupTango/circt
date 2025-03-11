@@ -26,6 +26,7 @@
 #include "llvm/Support/DOTGraphTraits.h"
 #include "llvm/Support/GraphWriter.h"
 #include "llvm/Support/JSON.h"
+#include "llvm/Support/raw_ostream.h"
 
 namespace circt {
 namespace hw {
@@ -34,6 +35,16 @@ namespace detail {
 // Using declaration to avoid polluting global namespace with CIRCT-specific
 // graph traits for mlir::Operation.
 using HWOperation = mlir::Operation;
+using HWOperationRef = mlir::Operation *;
+
+// Shallow iteration over all operations in the top-level module.
+template <typename Fn>
+void forEachOperation(HWOperationRef op, Fn f) {
+  for (mlir::Region &region : op->getRegions())
+    for (mlir::Block &block : region.getBlocks())
+      for (mlir::Operation &childOp : block.getOperations())
+        f(childOp);
+}
 
 } // namespace detail
 } // namespace hw
@@ -278,6 +289,56 @@ struct circt::hw::JSONGraphTraits<circt::hw::HWModuleOp>
       obj["style"] = "bold";
 
     return obj;
+  }
+};
+
+class GraphGenerator {
+public:
+  GraphGenerator(llvm::raw_ostream *os) : os(os), nextNodeId(0) {}
+
+  virtual ~GraphGenerator() = default;
+
+  // Main entry point: initialize, process modules, and wrap the output.
+  virtual std::string generateGraphJson() = 0;
+
+protected:
+  llvm::raw_ostream *os;
+  llvm::StringMap<circt::hw::detail::HWOperationRef> moduleMap;
+  int64_t nextNodeId;
+  llvm::json::Array outputJsonObjects;
+
+  std::string wrapJson(llvm::json::Array nodes) {
+    llvm::json::Object graphWrapper{{"id", std::to_string(nextNodeId)},
+                                    {"nodes", std::move(nodes)}};
+    llvm::json::Array graphArrayWrapper;
+    graphArrayWrapper.push_back(std::move(graphWrapper));
+    llvm::json::Object fileWrapper{{"label", "model.json"},
+                                   {"subgraphs", std::move(graphArrayWrapper)}};
+    llvm::json::Array fileArrayWrapper{
+        llvm::json::Value(std::move(fileWrapper))};
+
+    std::string jsonString;
+    llvm::raw_string_ostream jsonStream(jsonString);
+    llvm::json::OStream jso(jsonStream, /*IndentSize=*/2);
+    jso.value(llvm::json::Value(std::move(fileArrayWrapper)));
+    return jsonStream.str();
+  }
+
+  // Generate a unique ID for a node using its existing attribute if present.
+  std::string getUniqueId(circt::hw::detail::HWOperationRef node, const std::string &ns) {
+    if (ns.empty())
+      return NULL;
+
+    if (!node)
+      return ns + "_" + std::to_string(nextNodeId++);
+
+    return ns + "_" +
+           std::to_string(
+               mlir::cast<circt::IntegerAttr>(node->getAttr("hw.unique_id")).getInt());
+  }
+
+  bool isCombOp(circt::hw::detail::HWOperationRef op) {
+    return op->getName().getDialectNamespace() == "comb";
   }
 };
 
