@@ -622,9 +622,11 @@ protected:
       std::string oportId = getUniqueIOId(oportName, ns);
 
       if (HWOperationRef sourceOp = outputOper.getDefiningOp()) {
+        if (auto inst = mlir::dyn_cast<InstanceOp>(sourceOp)) {}
+        else
         // Generate edges from generic nodes into our
         // output node
-        ioIncomingEdges[oportId].push_back(std::make_pair(sourceOp, ns));
+          ioIncomingEdges[oportId].push_back(std::make_pair(sourceOp, ns));
 
         // TODO: special case where an input node
         // leads directly into our output node
@@ -744,14 +746,28 @@ protected:
       nodesToVisit.pop();
       if (!visited.insert(current).second)
         continue;
+      
+      // Iterate over all child nodes
       for (auto it = HWModuleOpGraphTraits::child_begin(current),
                 end = HWModuleOpGraphTraits::child_end(current);
            it != end; ++it) {
         HWOperationRef child = *it;
+
+        // Ignore child nodes that are hw.instance or hw.output
         if (auto c = mlir::dyn_cast<InstanceOp>(child)) {
           // pass
+        } else if (auto c = mlir::dyn_cast<OutputOp>(child)) {
+          // pass
         } else {
-          edgesMap[child].push_back(current);
+
+          // If current node is hw.instance or hw.out, do not push
+          if (auto c = mlir::dyn_cast<InstanceOp>(current)) {
+            // pass
+          } else if (auto c = mlir::dyn_cast<OutputOp>(current)) {
+            // pass
+          } else {
+            edgesMap[child].push_back(current);
+          }
           nodesToVisit.push(child);
         }
       }
