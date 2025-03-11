@@ -136,11 +136,15 @@ protected:
       if (globalVisited.count(std::pair<HWOperationRef, std::string>(op, ns)))
         continue;
 
-      if (incomingEdges[op].size() == 0)
+      std::vector<HWOperationRef> group;
+
+      if (incomingEdges[op].size() > 0)
+        group = collectCombGroup(incomingEdges[op][0], ns);
+      else if (incomingFromIOEdges[op].size() > 0)
+        group = collectCombGroup(op, ns);
+      else
         continue;
 
-      std::vector<HWOperationRef> group =
-          collectCombGroup(incomingEdges[op][0], ns);
       if (group.size() == 0)
         continue;
 
