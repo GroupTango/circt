@@ -376,8 +376,8 @@ protected:
     return edges;
   }
 
-  llvm::json::Array getioIncomingEdges(const std::string &portId,
-                                       const std::string &ns) {
+  llvm::json::Array getInputIncomingEdges(const std::string &portId,
+                                          const std::string &ns) {
     llvm::json::Array edges;
     for (const std::pair<HWOperationRef, std::string> &parent :
          ioIncomingEdges[portId]) {
@@ -396,26 +396,26 @@ protected:
     return edges;
   }
 
-  llvm::json::Array getOutputIncomingEdges(mlir::Value &outputOper,
-                                           std::string &outputId,
-                                           const std::string &ns) {
-    llvm::json::Array edges;
-    if (HWOperationRef operSource = outputOper.getDefiningOp()) {
-      outputIncomingEdges[outputId].push_back(operSource);
-      if (os)
-        *os << "Operation " << operSource->getName().getStringRef().str()
-            << " used output port " << outputId << "\n";
+  // llvm::json::Array getOutputIncomingEdges(mlir::Value &outputOper,
+  //                                          std::string &outputId,
+  //                                          const std::string &ns) {
+  //   llvm::json::Array edges;
+  //   if (HWOperationRef operSource = outputOper.getDefiningOp()) {
+  //     outputIncomingEdges[outputId].push_back(operSource);
+  //     if (os)
+  //       *os << "Operation " << operSource->getName().getStringRef().str()
+  //           << " used output port " << outputId << "\n";
 
-      for (HWOperationRef parent : outputIncomingEdges[outputId]) {
-        edges.push_back(
-            llvm::json::Object{{"sourceNodeId", getUniqueId(parent, ns)},
-                               {"sourceNodeOutputId", "0"},
-                               {"targetNodeInputId", "0"}});
-      }
-      outputIncomingEdges.erase(outputId);
-    }
-    return edges;
-  }
+  //     for (HWOperationRef parent : outputIncomingEdges[outputId]) {
+  //       edges.push_back(
+  //           llvm::json::Object{{"sourceNodeId", getUniqueId(parent, ns)},
+  //                              {"sourceNodeOutputId", "0"},
+  //                              {"targetNodeInputId", "0"}});
+  //     }
+  //     outputIncomingEdges.erase(outputId);
+  //   }
+  //   return edges;
+  // }
 
   void updateIncomingEdges() {
     for (llvm::json::Value &nodeVal : outputJsonObjects) {
@@ -427,8 +427,15 @@ protected:
         std::string id = obj->getString("id")->str();
         std::string ns = obj->getString("namespace")->str();
 
-        if (idToNodeMap.count(id))
-          (*obj)["incomingEdges"] = getIncomingEdges(idToNodeMap[id], ns);
+        if (ns.rfind("/Outputs") == ns.size() - 8) {
+          llvm::json::Array incomingEdges =
+              getInputIncomingEdges(id, ns.substr(0, ns.size() - 8));
+          (*obj)["incomingEdges"] = std::move(incomingEdges);
+        } else if (idToNodeMap.count(id)) {
+          llvm::json::Array incomingEdges =
+              getIncomingEdges(idToNodeMap[id], ns);
+          (*obj)["incomingEdges"] = std::move(incomingEdges);
+        }
       }
     }
   }
@@ -577,7 +584,7 @@ protected:
             {"attrs", jsonGraphTraits.getInputNodeAttributes()},
             {"id", iportId},
             {"namespace", getIONamespace(iport, ns)},
-            {"incomingEdges", getioIncomingEdges(iportId, ns)}};
+            {"incomingEdges", getInputIncomingEdges(iportId, ns)}};
         outputJsonObjects.push_back(std::move(jsonObj));
       }
     }
@@ -670,9 +677,17 @@ protected:
             // Case 3: output points to generic node
             // in the parent instance.
           } else {
-            std::string nsDiff = refModuleName + "_" + instanceName;
+            std::string destId = getUniqueId(user, parentNs);
+            destId = combOpIdMap[destId];
+            std::string destNs = destId;
+
+            size_t lastSlashPos = destId.find_last_of('/');
+            if (lastSlashPos != std::string::npos)
+              destNs = destId.substr(0, lastSlashPos);
+
             incomingFromIOEdges[user].emplace(
-                std::make_pair(oportName, nsDiff));
+                std::make_pair(oportName, destNs));
+
             *os << "(node), ";
           }
         }
@@ -705,8 +720,7 @@ protected:
           {"label", oportName},
           {"attrs", jsonGraphTraits.getInputNodeAttributes()},
           {"id", oportId},
-          {"namespace", getIONamespace(oport, ns)},
-          {"incomingEdges", getioIncomingEdges(oportId, ns)}};
+          {"namespace", getIONamespace(oport, ns)}};
       outputJsonObjects.push_back(std::move(jsonObj));
     }
   }
