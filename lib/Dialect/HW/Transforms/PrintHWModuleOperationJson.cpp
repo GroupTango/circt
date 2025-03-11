@@ -1,4 +1,4 @@
-//===- PrintHWModuleJson.cpp - Print the model graph --------*- C++ -*-===//
+//===- PrintHWModuleOpertionJson.cpp - Print the model graph --------*- C++ -*-===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -28,10 +28,10 @@ using namespace circt;
 using namespace hw;
 
 namespace {
-struct PrintHWModuleJsonPass
-    : public circt::hw::impl::PrintHWModuleJsonBase<PrintHWModuleJsonPass> {
+struct PrintHWModuleOperationJsonPass
+    : public circt::hw::impl::PrintHWModuleJsonBase<PrintHWModuleOperationJsonPass> {
 
-  PrintHWModuleJsonPass(raw_ostream &os) : os(os) {}
+  PrintHWModuleOperationJsonPass(raw_ostream &os) : os(os) {}
 
   void runOnOperation() override {
     mlir::Operation *baseOp = getOperation();
@@ -54,6 +54,6 @@ struct PrintHWModuleJsonPass
 };
 } // end anonymous namespace
 
-std::unique_ptr<mlir::Pass> circt::hw::createPrintHWModuleJsonPass() {
-  return std::make_unique<PrintHWModuleJsonPass>(llvm::errs());
+std::unique_ptr<mlir::Pass> circt::hw::createPrintHWModuleOperationJsonPass() {
+  return std::make_unique<PrintHWModuleOperationJsonPass>(llvm::errs());
 }

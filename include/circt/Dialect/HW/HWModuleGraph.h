@@ -327,7 +327,7 @@ protected:
   // Generate a unique ID for a node using its existing attribute if present.
   std::string getUniqueId(circt::hw::detail::HWOperationRef node, const std::string &ns) {
     if (ns.empty())
-      return NULL;
+      return "";
 
     if (!node)
       return ns + "_" + std::to_string(nextNodeId++);

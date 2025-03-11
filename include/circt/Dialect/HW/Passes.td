@@ -31,12 +31,12 @@ def PrintHWModuleGraph : Pass<"hw-print-module-graph", "mlir::ModuleOp"> {
 }
 
 def PrintHWModuleJson : Pass<"hw-print-module-json", "mlir::ModuleOp"> {
-  let summary = "Print a model-explorer compatible JSON representation of the HWModule's within a top-level module.";
-  let constructor =  "circt::hw::createPrintHWModuleJsonPass()";
+  let summary = "Print a model-explorer compatible JSON representation of HWModule operations.";
+  let constructor =  "circt::hw::createPrintHWModuleOperationJsonPass()";
 }
 
 def PrintHWModuleInstanceJson : Pass<"hw-print-instance-json", "mlir::ModuleOp"> {
-  let summary = "Print a model-explorer compatible JSON representation of the module heirachy.";
+  let summary = "Print a model-explorer compatible JSON representation of HWModule instance hierarchies.";
   let constructor =  "circt::hw::createPrintHWModuleInstanceJsonPass()";
 }
 
