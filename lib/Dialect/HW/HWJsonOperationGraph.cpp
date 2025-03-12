@@ -38,23 +38,43 @@ public:
 
   std::string generateGraphJson() override {
     initializeModules();
+    
+    // Stage 1: grouping comb nodes
+    while (!modulesToStart.empty()) {
+      auto [module1, ns1, parent_instance1, parent_ns1] =
+          modulesToStart.top();
 
-    while (!modulesToDrawIO.empty()) {
-      auto [module, ns, parent_instance, parent_ns] =
-          modulesToDrawIO.top(); // requires C++17
-      if (parent_ns.empty()) {
-        processGraphJson();
-        resetIOEdgeMaps();
-      }
-      modulesToDrawIO.pop();
-      drawModuleIO(module, ns, parent_instance, parent_ns);
+      if (parent_ns1.empty()) drawAllModules();
+
+      resetIOEdgeMaps();
+
+      modulesToStart.pop();
+      groupCombsInModule(module1, ns1, parent_instance1, parent_ns1);
     }
-    processGraphJson();
-    processCombGroups();
-    updateIncomingEdges();
+    drawAllModules();
+    // updateIncomingEdges();
     return wrapJson(outputJsonObjects);
   }
 
+  // Stage 2: drawing IO nodes
+  void drawAllModules() {
+    bool canProcessGraph = false;
+
+    while (!modulesToDrawIO.empty()) {
+      auto [module2, ns2, parent_instance2, parent_ns2] =
+          modulesToDrawIO.front();
+
+      if (parent_ns2.empty()) 
+        canProcessGraph = true;
+      modulesToDrawIO.pop_front();
+      drawModule(module2, ns2, parent_instance2, parent_ns2);
+    }
+
+    if (canProcessGraph) processGraphJson();
+    else *os << "ERROR: GRAPH NOT PROCESSED\n";
+  }
+
+  // Stage 3: processing the JSON
   void processGraphJson() {
     while (!modulesToProcess.empty()) {
       auto [module, ns, parent_instance, parent_ns] = modulesToProcess.front();
@@ -65,37 +85,49 @@ public:
 
 protected:
   HWOperationRef baseModule;
+  // We start the module pipeline here. The first stage is to perform comb grouping.
   std::stack<
       std::tuple<HWOperationRef, std::string, HWOperationRef, std::string>>
+      modulesToStart;
+  // The second stage is to draw in input and output nodes, as well as their edges.
+  std::deque<
+      std::tuple<HWOperationRef, std::string, HWOperationRef, std::string>>
       modulesToDrawIO;
+  // The final stage is to populate all edges for the normal operations.
   std::deque<
       std::tuple<HWOperationRef, std::string, HWOperationRef, std::string>>
       modulesToProcess;
 
-  // lmao this is such wack code. can probably use a union or sth
+      /* Four maps storing the incoming edges for each node */
+
   llvm::DenseMap<HWOperationRef, std::vector<HWOperationRef>> incomingEdges;
-  // incomingFromIOEdges[Node] = vector[ (name of IO port, namespace diff
-  // between node and IO port) ]
-  llvm::DenseMap<HWOperationRef, std::set<std::pair<std::string, std::string>>>
-      incomingFromIOEdges;
+  // incomingFromInputEdges[Node] = vector[ name of IO port ]
+  llvm::DenseMap<HWOperationRef, std::set<std::string>>
+      incomingFromInputEdges;
+  // incomingFromOutputEdges[Node] = vector[ IDs of IO port ]
+  llvm::DenseMap<HWOperationRef, std::set<std::string>>
+      incomingFromOutputEdges;
   // ioIncomingEdges[ IO port ID ] = vector[ (Node, namespace) ]
   llvm::StringMap<std::vector<std::pair<HWOperationRef, std::string>>>
       ioIncomingEdges;
-  // Currently used for output to input only. iOFromIOEdges[ Input port ID ] =
-  // vector[ Output port IDs ]
-  llvm::StringMap<std::vector<std::string>> iOFromIOEdges;
+  // Currently used for output to input only. 
+  // iOFromIOEdges[ Input port ID ] = vector[ Output port IDs ]
+  llvm::StringMap<std::vector<std::string>> ioFromIOEdges;
   HWModuleOpJSONGraphTraits jsonGraphTraits;
-  llvm::DenseMap<HWOperationRef, std::vector<std::string>> incomingInputEdges;
+
+  // idToNodeMap[ Normal operation node ID ] = Node
   llvm::StringMap<HWOperationRef> idToNodeMap;
-  llvm::StringMap<std::vector<HWOperationRef>> outputIncomingEdges;
+
+      /* For comb grouping */
 
   std::vector<std::pair<HWOperationRef, std::string>> combOps;
-  std::map<std::string, std::string> combOpIdMap;
+  // combGroupNsMap[ CombOp's default id, CombOp's group namespace ]
+  std::map<std::string, std::string> combGroupNsMap;
   std::set<std::pair<HWOperationRef, std::string>> globalVisited;
 
-  /*
-   * Collects a group of comb operations starting from the given operation.
-   */
+  /// Collects a group of comb operations starting from the given operation.
+  /// Outputs a vector of comb operations forming a group. All operations are
+  /// marked as visited in globalVisited and so will belong to exactly one group.
   std::vector<HWOperationRef> collectCombGroup(HWOperationRef op,
                                                const std::string &ns) {
     std::stack<HWOperationRef> stack;
@@ -128,6 +160,8 @@ protected:
     return group;
   }
 
+  /// @brief  Iterate through all comb nodes in the CombOps vector, generating the
+  /// groups as we go along. We store group information in combGroupNsMap.
   void processCombGroups() {
     for (auto &pair : combOps) {
       HWOperationRef op = pair.first;
@@ -136,17 +170,7 @@ protected:
       if (globalVisited.count(std::pair<HWOperationRef, std::string>(op, ns)))
         continue;
 
-      std::vector<HWOperationRef> group;
-
-      if (incomingEdges[op].size() > 0)
-        group = collectCombGroup(incomingEdges[op][0], ns);
-      else if (incomingFromIOEdges[op].size() > 0)
-        group = collectCombGroup(op, ns);
-      else
-        continue;
-
-      if (group.size() == 0)
-        continue;
+      std::vector<HWOperationRef> group = collectCombGroup(op, ns);
 
       // Generate a comb group node.
       std::string groupNs = ns + "/" + getUniqueId(op, "CombGroup");
@@ -154,18 +178,11 @@ protected:
       for (HWOperationRef combOp : group) {
         std::string originalId = getUniqueId(combOp, ns);
         std::string combId = getUniqueId(combOp, groupNs);
-        combOpIdMap[originalId] = combId;
+        combGroupNsMap[originalId] = groupNs;
 
         *os << "Mapping comb op: originalId=" << originalId
             << ", combId=" << combId << "\n";
-
-        llvm::json::Object jsonObj{
-            {"label", jsonGraphTraits.getNodeLabel(combOp, nullptr)},
-            {"attrs", jsonGraphTraits.getNodeAttributes(combOp, nullptr)},
-            {"id", combId},
-            {"namespace", groupNs},
-        };
-        outputJsonObjects.push_back(std::move(jsonObj));
+        
         idToNodeMap[combId] = combOp;
       }
     }
@@ -179,9 +196,10 @@ protected:
   // This function is necessary as all the IO edge maps store the IO nodes'
   // (namespaced) IDs, not labels.
   void resetIOEdgeMaps() {
-    iOFromIOEdges.clear();
-    // ioIncomingEdges.clear();
-    incomingFromIOEdges.clear();
+    ioFromIOEdges.clear();
+    ioIncomingEdges.clear();
+    incomingFromInputEdges.clear();
+    incomingFromOutputEdges.clear();
   }
 
   /// Discover all top-level modules, assign unique IDs to all operations via
@@ -235,7 +253,7 @@ protected:
     for (auto const &entry : moduleMap) {
       HWOperationRef op = moduleMap[entry.getKey()];
       std::string namespaceStr = entry.getKey().str();
-      modulesToDrawIO.push({op, namespaceStr, nullptr, ""});
+      modulesToStart.push({op, namespaceStr, nullptr, ""});
       if (os)
         *os << "Adding top level Module for "
                "processing - Name: "
@@ -243,7 +261,47 @@ protected:
     }
   }
 
-  void drawModuleIO(HWOperationRef module, const std::string &ns,
+
+  void groupCombsInModule(HWOperationRef module, const std::string &ns,
+                          HWOperationRef parentInstance,
+                          const std::string &parentNs) {
+    if (!module) {
+      return;
+    }
+    auto moduleOp = mlir::dyn_cast<circt::hw::HWModuleOp>(module);
+
+    *os << "Now grouping comb for module " << moduleOp.getName().str()
+        << " with namespace " << ns
+        << "\n";
+
+    forEachOperation(module, [&](mlir::Operation &op) {
+      HWOperationRef node = &op;
+
+      // Add child instance modules to be walked for grouping as well
+      if (InstanceOp op = mlir::dyn_cast<InstanceOp>(node)) {
+        std::string refModuleName = op.getReferencedModuleName().str();
+        std::string instanceName = op.getInstanceName().str();
+        std::string newNs = ns + "/" + refModuleName + "_" + instanceName;
+        if (moduleMap.count(refModuleName))
+          modulesToStart.push({moduleMap[refModuleName], newNs, node, ns});
+        else
+          modulesToStart.push({nullptr, newNs, node, ns});
+      }
+
+      // Populate combOps
+      else if (node->getDialect() &&
+               node->getDialect()->getNamespace() == "comb") {
+        combOps.push_back(std::pair<HWOperationRef, std::string>(node, ns));
+      } 
+    });
+
+    processCombGroups();
+    combOps.clear();
+
+    modulesToDrawIO.push_back({module, ns, parentInstance, parentNs});
+  }
+
+  void drawModule(HWOperationRef module, const std::string &ns,
                     HWOperationRef parentInstance,
                     const std::string &parentNs) {
     if (!module) {
@@ -270,23 +328,9 @@ protected:
     });
 
     modulesToProcess.push_back({moduleOp, ns, parentInstance, parentNs});
-
-    forEachOperation(module, [&](mlir::Operation &op) {
-      HWOperationRef node = &op;
-      if (InstanceOp op = mlir::dyn_cast<InstanceOp>(node)) {
-        std::string refModuleName = op.getReferencedModuleName().str();
-        std::string instanceName = op.getInstanceName().str();
-        std::string newNs = ns + "/" + refModuleName + "_" + instanceName;
-        if (moduleMap.count(refModuleName))
-          modulesToDrawIO.push({moduleMap[refModuleName], newNs, node, ns});
-        else
-          modulesToDrawIO.push({nullptr, newNs, node, ns});
-      }
-    });
   }
 
-  // Process a module by iterating over its operations
-  // and generating JSON nodes.
+  // Process a module by iterating over its operations and generating JSON nodes.
   void processModule(HWOperationRef module, const std::string &ns,
                      HWOperationRef parentInstance,
                      const std::string &parentNs) {
@@ -318,65 +362,51 @@ protected:
 
       } else if (auto output = mlir::dyn_cast<OutputOp>(node)) {
 
-      }
-      // We collect comb ops to be grouped later.
-      else if (node->getDialect() &&
-               node->getDialect()->getNamespace() == "comb") {
-        combOps.push_back(std::pair<HWOperationRef, std::string>(node, ns));
       } else {
+        std::string nodeId = getUniqueId(node, ns);
+
         llvm::json::Object jsonObj{
             {"label", jsonGraphTraits.getNodeLabel(node, moduleOp)},
             {"attrs", jsonGraphTraits.getNodeAttributes(node, moduleOp)},
-            {"id", getUniqueId(node, ns)},
-            {"namespace", ns}};
+            {"id", (isCombOp(node) ? getUniqueId(node, combGroupNsMap[nodeId]) : nodeId)},
+            {"namespace", (isCombOp(node) ? combGroupNsMap[nodeId] : ns)},
+            {"incomingEdges", getIncomingEdges(node, ns)}};
         outputJsonObjects.push_back(std::move(jsonObj));
+
         idToNodeMap[getUniqueId(node, ns)] = node;
       }
     });
   }
 
   // Generate incoming edge JSON for a node.
+  // Note: "ns" here refers to the original namespace, not the combGroup namespace (for comb ops).
   llvm::json::Array getIncomingEdges(HWOperationRef node,
                                      const std::string &ns) {
     llvm::json::Array edges;
-    std::string ns1 = ns;
-    if (isCombOp(node)) {
-      // The node's namespace contains the comb group, we want the original
-      // namespace.
-      size_t lastSlashPos = ns.find_last_of('/');
-      if (lastSlashPos != std::string::npos)
-        ns1 = ns.substr(0, lastSlashPos);
-    }
     for (HWOperationRef parent : incomingEdges[node]) {
-      std::string uniqueId = getUniqueId(parent, ns1);
-
-      if (isCombOp(parent))
-        *os << "Looking up parent: originalId=" << uniqueId << ", found combId="
-            << (combOpIdMap.count(uniqueId) ? combOpIdMap[uniqueId]
-                                            : "NOT FOUND")
-            << "\n";
+      std::string uniqueId = getUniqueId(parent, ns);
 
       edges.push_back(llvm::json::Object{
-          // If the parent is a comb op, we have to translate the original ID to
-          // the ID within the comb group namespace.
-          {"sourceNodeId", isCombOp(parent) ? combOpIdMap[uniqueId] : uniqueId},
+          {"sourceNodeId", (isCombOp(parent) ? getUniqueId(parent, combGroupNsMap[uniqueId]) : uniqueId)},
           {"sourceNodeOutputId", "0"},
           {"targetNodeInputId", "0"}});
     }
-    for (const std::pair<std::string, std::string> &iop :
-         incomingFromIOEdges[node]) {
-      std::string newNs = ns1;
-      if (!iop.second.empty())
-        newNs = newNs + "/" + iop.second;
-      std::string ioPort = getUniqueIOId(iop.first, newNs);
-      edges.push_back(llvm::json::Object{{"sourceNodeId", ioPort},
+    for (const std::string &iportName :
+          incomingFromInputEdges[node]) {
+      edges.push_back(llvm::json::Object{{"sourceNodeId", getUniqueIOId(iportName, ns)},
                                          {"sourceNodeOutputId", "0"},
                                          {"targetNodeInputId", "1"}});
+    }
+    for (const std::string &oportId :
+          incomingFromOutputEdges[node]) {
+      edges.push_back(llvm::json::Object{{"sourceNodeId", oportId},
+                                          {"sourceNodeOutputId", "0"},
+                                          {"targetNodeInputId", "1"}});
     }
     return edges;
   }
 
-  llvm::json::Array getInputIncomingEdges(const std::string &portId,
+  llvm::json::Array getIOIncomingEdges(const std::string &portId,
                                           const std::string &ns) {
     llvm::json::Array edges;
     for (const std::pair<HWOperationRef, std::string> &parent :
@@ -384,11 +414,11 @@ protected:
       std::string uniqueId = getUniqueId(parent.first, parent.second);
       edges.push_back(llvm::json::Object{
           {"sourceNodeId",
-           isCombOp(parent.first) ? combOpIdMap[uniqueId] : uniqueId},
+           isCombOp(parent.first) ? getUniqueId(parent.first, combGroupNsMap[uniqueId]) : uniqueId},
           {"sourceNodeOutputId", "1"},
           {"targetNodeInputId", "0"}});
     }
-    for (std::string ioPort : iOFromIOEdges[portId]) {
+    for (std::string ioPort : ioFromIOEdges[portId]) {
       edges.push_back(llvm::json::Object{{"sourceNodeId", ioPort},
                                          {"sourceNodeOutputId", "1"},
                                          {"targetNodeInputId", "1"}});
@@ -409,7 +439,7 @@ protected:
         if (ns.rfind("/Inputs") == ns.size() - 7 ||
             ns.rfind("/Outputs") == ns.size() - 8) {
           std::string parentNs = ns.substr(0, ns.find_last_of('/'));
-          (*obj)["incomingEdges"] = getInputIncomingEdges(id, parentNs);
+          (*obj)["incomingEdges"] = getIOIncomingEdges(id, parentNs);
         } else if (idToNodeMap.count(id)) {
           (*obj)["incomingEdges"] = getIncomingEdges(idToNodeMap[id], ns);
         }
@@ -433,7 +463,8 @@ protected:
 
       // The input node itself
       std::string iportName = iport.getName().str();
-
+      std::string iportId = getUniqueIOId(iportName, ns);
+      *os << "    The input operand for port " << iportName << " has output edges to ";;
       // Generate outgoing edges from the input node.
       // These are always regular nodes from the same module.
 
@@ -441,9 +472,12 @@ protected:
         if (OutputOp destOutput = mlir::dyn_cast<OutputOp>(user)) {
           // TODO: input that points directly to output
         } else {
-          incomingFromIOEdges[user].emplace(std::make_pair(iportName, ""));
+          incomingFromInputEdges[user].emplace(iportName);
+          std::string userId = getUniqueId(user, ns);
+          *os << userId << "; ";
         }
       }
+      *os << "\n";
     }
 
     // Generate incoming edges into the input node.
@@ -457,7 +491,7 @@ protected:
 
         std::string iportName = iport.getName().str();
         std::string iportId = getUniqueIOId(iportName, ns);
-        *os << "The input operand " << oper << " for port " << iportId;
+        *os << "    The input operand for port " << iportId;
 
         if (HWOperationRef operSource = oper.getDefiningOp()) {
 
@@ -486,7 +520,7 @@ protected:
                       sourceInstance.getInstanceName().str();
                   std::string newNs =
                       parentNs + "/" + refModuleName + "_" + instanceName;
-                  iOFromIOEdges[iportId].push_back(
+                  ioFromIOEdges[iportId].push_back(
                       getUniqueIOId(port.getName().str(), newNs));
                   break;
                 }
@@ -513,7 +547,7 @@ protected:
                   mlir::dyn_cast<circt::hw::HWModuleOp>(parentModule)) {
             std::string sourceIport =
                 parentModuleOp.getInputName(arg.getArgNumber()).str();
-            iOFromIOEdges[iportId].push_back(
+            ioFromIOEdges[iportId].push_back(
                 getUniqueIOId(sourceIport, parentNs));
             *os << " comes from a block argument\n";
           } else {
@@ -524,7 +558,7 @@ protected:
     }
   }
 
-  /// Generate output node JSONs
+  /// Generate input node JSONs
   void processInputs(circt::hw::HWModuleOp moduleOp, const std::string &ns,
                      HWOperationRef parentInstance,
                      const std::string &parentNs) {
@@ -546,7 +580,8 @@ protected:
             {"label", iportName},
             {"attrs", jsonGraphTraits.getInputNodeAttributes()},
             {"id", iportId},
-            {"namespace", getIONamespace(iport, ns)}};
+            {"namespace", getIONamespace(iport, ns)}
+          };
         outputJsonObjects.push_back(std::move(jsonObj));
       }
 
@@ -561,7 +596,8 @@ protected:
             {"attrs", jsonGraphTraits.getInputNodeAttributes()},
             {"id", iportId},
             {"namespace", getIONamespace(iport, ns)},
-            {"incomingEdges", getInputIncomingEdges(iportId, ns)}};
+            {"incomingEdges", getIOIncomingEdges(iportId, ns)}
+          };
         outputJsonObjects.push_back(std::move(jsonObj));
       }
     }
@@ -586,9 +622,11 @@ protected:
       std::string oportId = getUniqueIOId(oportName, ns);
 
       if (HWOperationRef sourceOp = outputOper.getDefiningOp()) {
+        if (auto inst = mlir::dyn_cast<InstanceOp>(sourceOp)) {}
+        else
         // Generate edges from generic nodes into our
         // output node
-        ioIncomingEdges[oportId].push_back(std::make_pair(sourceOp, ns));
+          ioIncomingEdges[oportId].push_back(std::make_pair(sourceOp, ns));
 
         // TODO: special case where an input node
         // leads directly into our output node
@@ -600,7 +638,7 @@ protected:
     }
 
     // Generate edges from output nodes to other
-    // nodes. These affect incomingFromIOEdges and
+    // nodes. These affect incomingFromOutputEdges and
     // iOFromIOEdges
     if (!isTopLevel) {
       InstanceOp parentInstanceOp = mlir::dyn_cast<InstanceOp>(parentInstance);
@@ -614,7 +652,7 @@ protected:
         std::string oportName = oport.getName().str();
         std::string oportId = getUniqueIOId(oportName, ns);
 
-        *os << "Output operand " << oportName << " users in namespace "
+        *os << "    Output operand " << oportName << " users in namespace "
             << parentNs << ": ";
         for (HWOperationRef user : result.getUsers()) {
           *os << user->getName() << " ";
@@ -644,7 +682,7 @@ protected:
               if (result.getLoc() == destOper.getLoc()) {
                 std::string destPortId =
                     getUniqueIOId(destOport.getName().str(), parentNs);
-                iOFromIOEdges[destPortId].push_back(oportId);
+                ioFromIOEdges[destPortId].push_back(oportId);
                 *os << "FOUND (" << destPortId << ", " << oportId << ") ";
                 break;
               }
@@ -654,10 +692,7 @@ protected:
             // Case 3: output points to generic node
             // in the parent instance.
           } else {
-            std::string nsDiff = refModuleName + "_" + instanceName;
-
-            incomingFromIOEdges[user].emplace(
-                std::make_pair(oportName, nsDiff));
+            incomingFromOutputEdges[user].emplace(oportId);
 
             *os << "(node), ";
           }
@@ -668,9 +703,6 @@ protected:
         // nodes
       }
     }
-    // TODO: figure out a compromise for generating
-    // edges from parent module ops to child input
-    // nodes
   }
 
   /// Generate output node JSONs
@@ -691,7 +723,8 @@ protected:
           {"label", oportName},
           {"attrs", jsonGraphTraits.getInputNodeAttributes()},
           {"id", oportId},
-          {"namespace", getIONamespace(oport, ns)}};
+          {"namespace", getIONamespace(oport, ns)},
+          {"incomingEdges", getIOIncomingEdges(oportId, ns)}};
       outputJsonObjects.push_back(std::move(jsonObj));
     }
   }
@@ -713,14 +746,28 @@ protected:
       nodesToVisit.pop();
       if (!visited.insert(current).second)
         continue;
+      
+      // Iterate over all child nodes
       for (auto it = HWModuleOpGraphTraits::child_begin(current),
                 end = HWModuleOpGraphTraits::child_end(current);
            it != end; ++it) {
         HWOperationRef child = *it;
+
+        // Ignore child nodes that are hw.instance or hw.output
         if (auto c = mlir::dyn_cast<InstanceOp>(child)) {
           // pass
+        } else if (auto c = mlir::dyn_cast<OutputOp>(child)) {
+          // pass
         } else {
-          edgesMap[child].push_back(current);
+
+          // If current node is hw.instance or hw.out, do not push
+          if (auto c = mlir::dyn_cast<InstanceOp>(current)) {
+            // pass
+          } else if (auto c = mlir::dyn_cast<OutputOp>(current)) {
+            // pass
+          } else {
+            edgesMap[child].push_back(current);
+          }
           nodesToVisit.push(child);
         }
       }
