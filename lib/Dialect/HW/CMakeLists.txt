@@ -9,7 +9,6 @@ set(CIRCT_HW_Sources
   HWModelExplorer.cpp
   HWJsonInstanceGraph.cpp
   HWJsonOperationGraph.cpp
-  HWJsonInstanceDiffGraph.cpp
   HWModuleOpInterface.cpp
   HWOpInterfaces.cpp
   HWOps.cpp
